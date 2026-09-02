@@ -186,7 +186,17 @@ class LiberoEnv(gym.Env):
         return observation, reward, done, truncated, info
 
 
-def register_libero_envs():
+def register_libero_envs(task_filter: str | None = None):
+    """Register gym envs for the LIBERO benchmark suites.
+
+    Args:
+        task_filter: Optional task name (without the ``libero_sim/`` prefix).
+            When given, only the matching task is registered. This keeps
+            startup fast for benchmarks with thousands of task variants
+            (e.g. LIBERO-plus) where each rollout process only needs one env.
+            When None, the historical behavior of registering every task in
+            the five suites is preserved.
+    """
     benchmark_dict = benchmark.get_benchmark_dict()
     for task_suite_name in [
         "libero_10",
@@ -199,6 +209,8 @@ def register_libero_envs():
         for task_id in range(task_suite.get_num_tasks()):
             task = task_suite.get_task(task_id)
             task_name = task.name
+            if task_filter is not None and task_name != task_filter:
+                continue
             task_description = task.language
             task_bddl_file = os.path.join(
                 get_libero_path("bddl_files"), task.problem_folder, task.bddl_file

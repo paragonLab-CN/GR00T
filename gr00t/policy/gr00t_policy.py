@@ -382,7 +382,9 @@ class Gr00tPolicy(BasePolicy):
 
         Args:
             observation: Batched observation dictionary
-            options: Optional parameters (currently unused)
+            options: Optional parameters forwarded to the model action head.
+                FLARE-VLA uses ``options["initial_noise"]`` to explicitly
+                control the flow-matching denoising start state.
 
         Returns:
             Tuple of (actions_dict, info_dict)
@@ -403,9 +405,11 @@ class Gr00tPolicy(BasePolicy):
         collated_inputs = self.collate_fn(processed_inputs)
         collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
 
-        # Step 4: Run model inference to predict actions
+        # Step 4: Run model inference to predict actions.
+        # Forward options so callers can explicitly provide the initial
+        # flow-matching action noise without changing the default behavior.
         with torch.inference_mode():
-            model_pred = self.model.get_action(**collated_inputs)
+            model_pred = self.model.get_action(**collated_inputs, options=options)
         normalized_action = model_pred["action_pred"].float()
 
         # Step 5: Decode actions from normalized space back to physical units
@@ -421,6 +425,69 @@ class Gr00tPolicy(BasePolicy):
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
         return casted_action, {}
+
+    def get_action_candidates(
+        self,
+        observation: dict[str, Any],
+        initial_noises: torch.Tensor,
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        """Generate K candidates from one observation with one cached backbone pass.
+
+        ``initial_noises`` must have shape ``[B,K,H_internal,D_internal]``.
+        Returned action fields have shape ``[B,K,H_decoded,D_field]``.
+        """
+        if self.strict:
+            self.check_observation(observation)
+        if not torch.is_tensor(initial_noises) or initial_noises.ndim != 4:
+            raise ValueError(
+                "initial_noises must be a torch.Tensor with shape [B,K,H,D]"
+            )
+
+        unbatched_observations = self._unbatch_observation(observation)
+        processed_inputs = []
+        states = []
+        for obs in unbatched_observations:
+            vla_step_data = self._to_vla_step_data(obs)
+            states.append(vla_step_data.states)
+            messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
+            processed_inputs.append(self.processor(messages))
+
+        collated_inputs = self.collate_fn(processed_inputs)
+        collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
+
+        with torch.inference_mode():
+            model_pred = self.model.get_action_candidates(
+                **collated_inputs,
+                initial_noises=initial_noises,
+            )
+        normalized_action = model_pred["action_pred"].float()  # [B,K,H,D]
+        batch_size, candidate_k, horizon, action_dim = normalized_action.shape
+
+        # decode_action expects an ordinary batch [N,H,D], so flatten B and K,
+        # repeat the matching states, decode once, then restore candidate axis.
+        flat_normalized_action = normalized_action.reshape(
+            batch_size * candidate_k, horizon, action_dim
+        )
+        batched_states = {}
+        for key in self.modality_configs["state"].modality_keys:
+            state_value = np.stack([s[key] for s in states], axis=0)
+            batched_states[key] = np.repeat(state_value, candidate_k, axis=0)
+
+        flat_unnormalized = self.processor.decode_action(
+            flat_normalized_action.cpu().numpy(),
+            self.embodiment_tag,
+            batched_states,
+        )
+        candidate_actions = {
+            key: value.astype(np.float32).reshape(
+                batch_size, candidate_k, value.shape[1], value.shape[2]
+            )
+            for key, value in flat_unnormalized.items()
+        }
+        return candidate_actions, {
+            "backbone_evaluations": 1,
+            "candidate_k": candidate_k,
+        }
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

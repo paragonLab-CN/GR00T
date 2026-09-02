@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 from typing import Any, Tuple
 
 import torch
@@ -43,6 +44,7 @@ class Gr00tN1d7ActionHead(nn.Module):
     def __init__(self, config: Gr00tN1d7Config):
         super().__init__()
         self.config = config
+        config.model_name = os.environ.get("GR00T_BACKBONE_MODEL_NAME", config.model_name)
         self.hidden_size = config.hidden_size
         self.input_embedding_dim = config.input_embedding_dim
 
@@ -326,17 +328,64 @@ class Gr00tN1d7ActionHead(nn.Module):
             state_features: [B, state_horizon, input_embedding_dim]
             embodiment_id: [B] (embodiment IDs)
             backbone_output: Output from the backbone model
+            options: Optional action-generation controls. When
+                ``initial_noise`` is supplied, it must have shape
+                ``[B, config.action_horizon, action_dim]``.
         """
         vl_embeds = backbone_features
 
-        # Set initial actions as the sampled noise.
+        # Set the initial actions used as the flow-matching denoising start.
+        # By default this preserves the official behavior (fresh Gaussian noise).
+        # FLARE-VLA may instead pass an explicit tensor through
+        # options["initial_noise"] for exact candidate control and replay.
         batch_size = vl_embeds.shape[0]
         device = vl_embeds.device
-        actions = torch.randn(
-            size=(batch_size, self.config.action_horizon, self.action_dim),
-            dtype=vl_embeds.dtype,
-            device=device,
+        expected_noise_shape = (
+            batch_size,
+            self.config.action_horizon,
+            self.action_dim,
         )
+
+        initial_noise = None if options is None else options.get("initial_noise")
+        if initial_noise is None:
+            actions = torch.randn(
+                size=expected_noise_shape,
+                dtype=vl_embeds.dtype,
+                device=device,
+            )
+        else:
+            if not torch.is_tensor(initial_noise):
+                initial_noise = torch.as_tensor(initial_noise)
+
+            if initial_noise.ndim != 3:
+                raise ValueError(
+                    "initial_noise must have shape "
+                    "[batch_size, model_action_horizon, internal_action_dim]; "
+                    f"got ndim={initial_noise.ndim}, shape={tuple(initial_noise.shape)}"
+                )
+            if tuple(initial_noise.shape) != expected_noise_shape:
+                raise ValueError(
+                    "initial_noise shape mismatch: expected "
+                    f"{expected_noise_shape}, got {tuple(initial_noise.shape)}. "
+                    "For GR00T-N1.7-LIBERO this is normally [B, 40, 132], "
+                    "even when only the first 8 decoded action steps are used."
+                )
+            if not torch.is_floating_point(initial_noise):
+                raise TypeError(
+                    "initial_noise must be a floating-point tensor; "
+                    f"got dtype={initial_noise.dtype}"
+                )
+
+            # Copy the caller-owned tensor so RTC/inpainting updates below never
+            # mutate the saved initial-noise record. Device/dtype conversion is
+            # deliberately done here, at the point where the model requirements
+            # are known exactly.
+            actions = initial_noise.detach().to(
+                device=device,
+                dtype=vl_embeds.dtype,
+            ).clone()
+            if not torch.isfinite(actions).all():
+                raise ValueError("initial_noise contains NaN or Inf values")
 
         dt = 1.0 / self.num_inference_timesteps
         vel_strength = torch.ones_like(actions)
@@ -474,7 +523,7 @@ class Gr00tN1d7ActionHead(nn.Module):
 
 
 def get_backbone_cls(config: Gr00tN1d7Config):
-    if "nvidia/Cosmos-Reason2" in config.model_name or "Qwen/Qwen3-VL" in config.model_name:
+    if "Cosmos-Reason2" in config.model_name or "Qwen3-VL" in config.model_name:
         # We import here as Qwen3Backbone depends on newer transformers versions than the rest of the code.
         from gr00t.model.modules.qwen3_backbone import Qwen3Backbone
 
@@ -511,6 +560,7 @@ class Gr00tN1d7(PreTrainedModel):
         """
         super().__init__(config)
         self.config = config
+        config.model_name = os.environ.get("GR00T_BACKBONE_MODEL_NAME", config.model_name)
 
         backbone_cls = get_backbone_cls(config)
         self.backbone = backbone_cls(
@@ -598,6 +648,107 @@ class Gr00tN1d7(PreTrainedModel):
         action_outputs = self.action_head.get_action(backbone_outputs, action_inputs, options)
 
         return action_outputs
+
+    @torch.no_grad()
+    def get_action_candidates(
+        self,
+        inputs: dict,
+        initial_noises: torch.Tensor,
+        options: dict[str, Any] | None = None,
+    ) -> BatchFeature:
+        """Generate K action candidates while evaluating the VLM backbone once.
+
+        Args:
+            inputs: Collated model inputs, in the same format accepted by ``get_action``.
+            initial_noises: Explicit flow-matching starts with shape
+                ``[B, K, config.action_horizon, action_dim]``.
+            options: Optional extra action-head controls. RTC inputs are intentionally
+                unsupported in this offline candidate-generation path.
+
+        Returns:
+            BatchFeature with ``action_pred`` shaped
+            ``[B, K, config.action_horizon, action_dim]``.
+        """
+        if not torch.is_tensor(initial_noises):
+            initial_noises = torch.as_tensor(initial_noises)
+        if initial_noises.ndim != 4:
+            raise ValueError(
+                "initial_noises must have shape [B,K,H,D]; "
+                f"got {tuple(initial_noises.shape)}"
+            )
+
+        batch_size, candidate_k, horizon, action_dim = initial_noises.shape
+        expected_horizon = int(self.config.action_horizon)
+        expected_action_dim = int(self.action_head.action_dim)
+        if horizon != expected_horizon or action_dim != expected_action_dim:
+            raise ValueError(
+                "initial_noises shape mismatch: expected [B,K,"
+                f"{expected_horizon},{expected_action_dim}], got "
+                f"{tuple(initial_noises.shape)}"
+            )
+        if candidate_k < 1:
+            raise ValueError("candidate_k must be at least 1")
+
+        # Prepare once and evaluate the expensive vision-language backbone once.
+        backbone_inputs, action_inputs = self.prepare_input(inputs)
+        backbone_outputs = self.backbone(backbone_inputs)
+
+        if "action" in action_inputs:
+            raise NotImplementedError(
+                "Cached offline candidate generation does not support RTC action inputs"
+            )
+
+        # Encode the backbone output and robot state once. _encode_features also
+        # applies the action-head VL normalization/self-attention exactly once.
+        features = self.action_head._encode_features(backbone_outputs, action_inputs)
+        if features.backbone_features.shape[0] != batch_size:
+            raise ValueError(
+                f"Noise batch B={batch_size} does not match model batch "
+                f"B={features.backbone_features.shape[0]}"
+            )
+
+        # Flatten candidate K into the batch dimension. This lets all candidates,
+        # including an optional duplicate replay noise, pass through one action-head
+        # invocation with exactly the same cached conditioning features.
+        def repeat_candidate_batch(value):
+            if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == batch_size:
+                return value.repeat_interleave(candidate_k, dim=0)
+            return value
+
+        repeated_backbone_output = BatchFeature(
+            data=tree.map_structure(repeat_candidate_batch, dict(backbone_outputs))
+        )
+        repeated_action_input = BatchFeature(
+            data=tree.map_structure(repeat_candidate_batch, dict(action_inputs))
+        )
+        repeated_backbone_features = features.backbone_features.repeat_interleave(
+            candidate_k, dim=0
+        )
+        repeated_state_features = features.state_features.repeat_interleave(
+            candidate_k, dim=0
+        )
+        repeated_embodiment_id = action_inputs.embodiment_id.repeat_interleave(
+            candidate_k, dim=0
+        )
+
+        flat_initial_noises = initial_noises.reshape(
+            batch_size * candidate_k, horizon, action_dim
+        )
+        candidate_options = dict(options or {})
+        candidate_options["initial_noise"] = flat_initial_noises
+
+        flat_outputs = self.action_head.get_action_with_features(
+            backbone_features=repeated_backbone_features,
+            state_features=repeated_state_features,
+            embodiment_id=repeated_embodiment_id,
+            backbone_output=repeated_backbone_output,
+            action_input=repeated_action_input,
+            options=candidate_options,
+        )
+        action_pred = flat_outputs["action_pred"].reshape(
+            batch_size, candidate_k, horizon, action_dim
+        )
+        return BatchFeature(data={"action_pred": action_pred})
 
     @property
     def device(self):

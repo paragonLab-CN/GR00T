@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from pathlib import Path
+import random
 import sys
 import time
 from typing import Any
@@ -30,6 +31,7 @@ from gr00t.policy import BasePolicy
 from gr00t.utils.determinism import seed_everything
 import gymnasium as gym
 import numpy as np
+import torch
 from tqdm import tqdm
 import tyro
 
@@ -120,7 +122,11 @@ def get_libero_env_fn(
     def env_fn():
         from gr00t.eval.sim.LIBERO.libero_env import register_libero_envs
 
-        register_libero_envs()
+        # env_name is "libero_sim/<task_name>"; only register the target task.
+        # LIBERO-plus registers thousands of task variants, and registering
+        # all of them per rollout process makes startup needlessly slow.
+        task_name = env_name.split("/", 1)[1] if "/" in env_name else env_name
+        register_libero_envs(task_filter=task_name)
         return gym.make(env_name)
 
     return env_fn
@@ -217,6 +223,130 @@ class _RobustAsyncVectorEnv(gym.vector.AsyncVectorEnv):
                 infos[k][env_num] = v
             infos[f"_{k}"][env_num] = True
         return infos
+    
+def _seed_candidate_sampling(seed: int) -> None:
+    """Seed local RNGs before each GR00T candidate sampling call."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _to_saveable_cpu(x):
+    """Recursively convert observations/actions to CPU-saveable objects."""
+    if torch.is_tensor(x):
+        return x.detach().cpu().clone()
+
+    if isinstance(x, np.ndarray):
+        # object array 里面可能嵌套 dict/list，直接 torch.from_numpy 会失败
+        if x.dtype == object:
+            return [_to_saveable_cpu(v) for v in x.tolist()]
+        return torch.from_numpy(np.array(x, copy=True))
+
+    if isinstance(x, dict):
+        return {k: _to_saveable_cpu(v) for k, v in x.items()}
+
+    if isinstance(x, list):
+        return [_to_saveable_cpu(v) for v in x]
+
+    if isinstance(x, tuple):
+        return tuple(_to_saveable_cpu(v) for v in x)
+
+    if isinstance(x, (str, int, float, bool)) or x is None:
+        return x
+
+    # 兜底：不认识的类型先转成字符串，避免 torch.save 崩掉
+    return repr(x)
+
+
+def sample_k_candidate_actions(
+    policy: BasePolicy,
+    observations: Any,
+    k: int = 4,
+    base_seed: int = 2026,
+    rollout_step: int = 0,
+    verbose: bool = False,
+    candidate_save_dir: str | None = None,
+):
+    """Sample K candidate action trajectories for the same observation.
+
+    Current MVP behavior:
+    1. Repeatedly call policy.get_action(observations) K times.
+    2. Print/debug the stacked candidate shape [B, K, T, D].
+    3. Return candidate 0 to env.step for now.
+
+    Later, replace `chosen_idx = 0` with the LeWM best-index.
+    """
+    if k <= 1:
+        return policy.get_action(observations)
+
+    candidate_actions: list[dict[str, np.ndarray]] = []
+    candidate_infos: list[Any] = []
+
+    for candidate_idx in range(k):
+        # Make each candidate use a different initial diffusion noise.
+        # rollout_step is included so the same candidate index does not reuse
+        # exactly the same RNG state at every environment step.
+        seed = int(base_seed) + int(rollout_step) * 100000 + int(candidate_idx)
+        _seed_candidate_sampling(seed)
+
+        actions_i, info_i = policy.get_action(observations)
+        candidate_actions.append(actions_i)
+        candidate_infos.append(info_i)
+    
+    # 每个 action 字段保存成 [B, K, T, D_key]
+    stacked_candidate_actions = {
+        action_key: np.stack(
+            [np.asarray(actions_i[action_key]).copy() for actions_i in candidate_actions],
+            axis=1,
+        )
+        for action_key in candidate_actions[0].keys()
+    }
+
+    if verbose:
+        print(f"\n[FLARE debug] rollout_step={rollout_step}, sampled K={k} candidates")
+        for action_key, stacked in stacked_candidate_actions.items():
+            print(f"[FLARE debug] {action_key}: candidate_actions shape = {stacked.shape}")
+            if k >= 2:
+                max_abs_diff = np.max(np.abs(stacked[:, 0] - stacked[:, 1]))
+                print(
+                    f"[FLARE debug] max |candidate 0 - candidate 1| "
+                    f"for {action_key} = {max_abs_diff:.6f}"
+                )
+
+    chosen_idx = 0
+
+    if candidate_save_dir:
+        save_dir = Path(candidate_save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / f"step_{int(rollout_step):06d}.pt"
+
+        stacked_candidate_actions_torch = {
+            action_key: torch.from_numpy(stacked.copy())
+            for action_key, stacked in stacked_candidate_actions.items()
+        }
+
+        torch.save(
+            {
+                "rollout_step": int(rollout_step),
+                "candidate_k": int(k),
+                "chosen_idx": int(chosen_idx),
+                "action_keys": list(stacked_candidate_actions_torch.keys()),
+
+                # 这个 observation 就是生成 K 条候选动作时的当前观测
+                "observations": _to_saveable_cpu(observations),
+
+                # 每个 action 字段形状是 [B, K, T, 1]
+                "candidate_actions": stacked_candidate_actions_torch,
+            },
+            save_path,
+        )
+
+        if verbose:
+            print(f"[FLARE debug] saved candidate actions to: {save_path}")
+
+    return candidate_actions[chosen_idx], candidate_infos[chosen_idx]
 
 
 def run_rollout_gymnasium_policy(
@@ -226,6 +356,10 @@ def run_rollout_gymnasium_policy(
     n_episodes: int = 10,
     n_envs: int = 1,
     seed: int | None = None,
+    candidate_k: int = 1,
+    candidate_base_seed: int = 2026,
+    candidate_verbose: bool = False,
+    candidate_save_dir: str | None = None,
 ) -> Any:
     """Run policy rollouts in parallel environments.
 
@@ -289,7 +423,15 @@ def run_rollout_gymnasium_policy(
 
     pbar = tqdm(total=n_episodes, desc="Episodes")
     while completed_episodes < n_episodes:
-        actions, _ = policy.get_action(observations)
+        actions, _ = sample_k_candidate_actions(
+            policy=policy,
+            observations=observations,
+            k=candidate_k,
+            base_seed=candidate_base_seed,
+            rollout_step=i,
+            verbose=candidate_verbose and i < 3,
+            candidate_save_dir=candidate_save_dir,
+        )
         next_obs, rewards, terminations, truncations, env_infos = env.step(actions)
         # NOTE (FY): Currently we don't properly handle policy reset. For now, our policy are stateless,
         # but in the future if we need policy to be stateful, we need to detect env reset and call policy.reset()
@@ -447,6 +589,10 @@ def run_gr00t_sim_policy(
     trt_engine_path: str = "",
     trt_mode: TrtMode = TrtMode.N17_FULL_PIPELINE,
     seed: int | None = None,
+    candidate_k: int = 1,
+    candidate_base_seed: int = 2026,
+    candidate_verbose: bool = False,
+    candidate_save_dir: str | None = None,
 ):
     # seed_everything resolves `None` via the GR00T_EVAL_SEED env var and is a
     # no-op when that is also unset, so the historical non-deterministic
@@ -491,6 +637,10 @@ def run_gr00t_sim_policy(
         n_episodes=n_episodes,
         n_envs=n_envs,
         seed=seed,
+        candidate_k=candidate_k,
+        candidate_base_seed=candidate_base_seed,
+        candidate_verbose=candidate_verbose,
+        candidate_save_dir=candidate_save_dir,
     )
     print("Video saved to: ", wrapper_configs.video.video_dir)
     return results
@@ -540,6 +690,18 @@ class RolloutConfig:
     ``GR00T_EVAL_SEED`` env var; if that is also unset, keeps the historical
     non-deterministic behavior."""
 
+    candidate_k: int = 1
+    """Number of candidate action trajectories sampled for the same observation.
+    Use 1 for the original GR00T behavior; use 4/8 for FLARE-VLA candidate sampling."""
+
+    candidate_base_seed: int = 2026
+    """Base seed used to create different initial denoising noises for candidates."""
+
+    candidate_verbose: bool = False
+    """If True, print candidate action shapes and candidate differences for first rollout steps."""
+
+    candidate_save_dir: str | None = None
+    """Directory used to save FLARE candidate action .pt files. If None, nothing is saved."""
 
 if __name__ == "__main__":
     args = tyro.cli(RolloutConfig)
@@ -567,6 +729,10 @@ if __name__ == "__main__":
         trt_engine_path=args.trt_engine_path,
         trt_mode=args.trt_mode,
         seed=args.seed,
+        candidate_k=args.candidate_k,
+        candidate_base_seed=args.candidate_base_seed,
+        candidate_verbose=args.candidate_verbose,
+        candidate_save_dir=args.candidate_save_dir,
     )
     print("results: ", results)
     print("success rate: ", np.mean(results[1]))

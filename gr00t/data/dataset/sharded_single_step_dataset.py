@@ -155,6 +155,7 @@ class ShardedSingleStepDataset(ShardedDataset):
         self.rng = np.random.default_rng(seed)
         action_delta_indices = modality_configs["action"].delta_indices
         self.action_horizon = max(action_delta_indices) - min(action_delta_indices) + 1
+        self.supervised_steps = self.action_horizon
 
         self.episode_loader = LeRobotEpisodeLoader(
             dataset_path=dataset_path,

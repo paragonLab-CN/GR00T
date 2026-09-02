@@ -40,9 +40,30 @@ class FinetuneConfig:
 
     modality_config_path: str | None = None
     """
-    Path to a Python file defining the modality configuration for the given embodiment. 
-    If None, use the pre-registered modality config in `gr00t/configs/data/embodiment_configs.py`. 
+    Path to a Python file defining the modality configuration for the given embodiment.
+    If None, use the pre-registered modality config in `gr00t/configs/data/embodiment_configs.py`.
     """
+
+    distillation_dataset_dir: str | None = None
+    """Optional FLARE output directory containing the index, teacher records, and summary."""
+
+    distillation_index_path: str | None = None
+    """Optional explicit FLARE ``distillation_index.jsonl`` path."""
+
+    teacher_records_path: str | None = None
+    """Optional explicit FLARE ``teacher_records_enriched.pt`` path."""
+
+    keep_full_gt_dataset: bool = False
+    """Mix the original full LeRobot dataset with a teacher-only FLARE index."""
+
+    teacher_mix_ratio: float = 0.2
+    """Target sampling fraction for the teacher-only source when full GT is retained."""
+
+    validate_config_only: bool = False
+    """Build and validate the resolved training configuration, then exit before loading the model."""
+
+    allow_padding: bool = False
+    """Clamp temporal indices at episode boundaries when configured deltas cross an episode boundary."""
 
     # --- Model Tuning Flags ---
     tune_llm: bool = False

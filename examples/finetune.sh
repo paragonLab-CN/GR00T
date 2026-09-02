@@ -6,9 +6,11 @@ NUM_GPUS="${NUM_GPUS:-1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 SAVE_STEPS="${SAVE_STEPS:-1000}"
 MAX_STEPS="${MAX_STEPS:-10000}"
+SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-5}"
 USE_WANDB="${USE_WANDB:-1}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
+LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 SHARD_SIZE="${SHARD_SIZE:-1024}"
 NUM_SHARDS_PER_EPOCH="${NUM_SHARDS_PER_EPOCH:-100000}"
 EPISODE_SAMPLING_RATE="${EPISODE_SAMPLING_RATE:-0.1}"
@@ -21,6 +23,12 @@ OUTPUT_DIR=""
 EXPERIMENT_NAME=""
 WANDB_PROJECT=""
 STATE_DROPOUT_PROB=""
+DISTILLATION_DATASET_DIR=""
+DISTILLATION_INDEX_PATH=""
+TEACHER_RECORDS_PATH=""
+KEEP_FULL_GT_DATASET=0
+TEACHER_MIX_RATIO="0.2"
+ALLOW_PADDING=0
 EXTRA_ARGS=()
 
 usage() {
@@ -32,6 +40,12 @@ Usage: bash examples/finetune.sh \
   --output-dir <path> \
   [--modality-config-path <path>] \
   [--state-dropout-prob <value>] \
+  [--distillation-dataset-dir <path>] \
+  [--distillation-index-path <path>] \
+  [--teacher-records-path <path>] \
+  [--keep-full-gt-dataset] \
+  [--teacher-mix-ratio <value>] \
+  [--allow-padding] \
   [--save-only-model] \
   [-- <extra launch_finetune.py args>...]
 EOF
@@ -71,6 +85,30 @@ while [ "$#" -gt 0 ]; do
             STATE_DROPOUT_PROB="$2"
             shift 2
             ;;
+        --distillation-dataset-dir)
+            DISTILLATION_DATASET_DIR="$2"
+            shift 2
+            ;;
+        --distillation-index-path)
+            DISTILLATION_INDEX_PATH="$2"
+            shift 2
+            ;;
+        --teacher-records-path)
+            TEACHER_RECORDS_PATH="$2"
+            shift 2
+            ;;
+        --keep-full-gt-dataset)
+            KEEP_FULL_GT_DATASET=1
+            shift
+            ;;
+        --teacher-mix-ratio)
+            TEACHER_MIX_RATIO="$2"
+            shift 2
+            ;;
+        --allow-padding)
+            ALLOW_PADDING=1
+            shift
+            ;;
         --save-only-model)
             SAVE_ONLY_MODEL=1
             shift
@@ -100,6 +138,18 @@ for required_var in BASE_MODEL_PATH DATASET_PATH EMBODIMENT_TAG OUTPUT_DIR; do
     fi
 done
 
+if [ -n "$DISTILLATION_DATASET_DIR" ] && \
+   { [ -n "$DISTILLATION_INDEX_PATH" ] || [ -n "$TEACHER_RECORDS_PATH" ]; }; then
+    echo "Use either --distillation-dataset-dir or the explicit FLARE file pair, not both" >&2
+    exit 1
+fi
+
+if { [ -n "$DISTILLATION_INDEX_PATH" ] && [ -z "$TEACHER_RECORDS_PATH" ]; } || \
+   { [ -z "$DISTILLATION_INDEX_PATH" ] && [ -n "$TEACHER_RECORDS_PATH" ]; }; then
+    echo "FLARE training requires both --distillation-index-path and --teacher-records-path" >&2
+    exit 1
+fi
+
 WANDB_FLAG=()
 if [ "$USE_WANDB" = "1" ]; then
     WANDB_FLAG+=(--use_wandb)
@@ -113,14 +163,14 @@ LAUNCH_CMD=(
     --num_gpus "$NUM_GPUS"
     --output_dir "$OUTPUT_DIR"
     --save_steps "$SAVE_STEPS"
-    --save_total_limit 5
+    --save_total_limit "$SAVE_TOTAL_LIMIT"
     --max_steps "$MAX_STEPS"
     --warmup_ratio 0.05
     --weight_decay 1e-5
-    --learning_rate 1e-4
+    --learning_rate "$LEARNING_RATE"
     "${WANDB_FLAG[@]}"
     --global_batch_size "$GLOBAL_BATCH_SIZE"
-    --color_jitter_params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08
+    --color_jitter_params brightness 0.5 contrast 0.6 saturation 0.7 hue 0.12
     --dataloader_num_workers "$DATALOADER_NUM_WORKERS"
     --shard_size "$SHARD_SIZE"
     --num_shards_per_epoch "$NUM_SHARDS_PER_EPOCH"
@@ -136,9 +186,25 @@ fi
 if [ -n "$WANDB_PROJECT" ]; then
     LAUNCH_CMD+=(--wandb_project "$WANDB_PROJECT")
 fi
+if [ -n "${EXTRA_AUGMENTATION_CONFIG:-}" ]; then
+    LAUNCH_CMD+=(--extra_augmentation_config "$EXTRA_AUGMENTATION_CONFIG")
+fi
 
 if [ -n "$STATE_DROPOUT_PROB" ]; then
     LAUNCH_CMD+=(--state_dropout_prob "$STATE_DROPOUT_PROB")
+fi
+if [ -n "$DISTILLATION_DATASET_DIR" ]; then
+    LAUNCH_CMD+=(--distillation_dataset_dir "$DISTILLATION_DATASET_DIR")
+elif [ -n "$DISTILLATION_INDEX_PATH" ]; then
+    LAUNCH_CMD+=(--distillation_index_path "$DISTILLATION_INDEX_PATH")
+    LAUNCH_CMD+=(--teacher_records_path "$TEACHER_RECORDS_PATH")
+fi
+if [ "$KEEP_FULL_GT_DATASET" = "1" ]; then
+    LAUNCH_CMD+=(--keep_full_gt_dataset)
+    LAUNCH_CMD+=(--teacher_mix_ratio "$TEACHER_MIX_RATIO")
+fi
+if [ "$ALLOW_PADDING" = "1" ]; then
+    LAUNCH_CMD+=(--allow_padding)
 fi
 if [ -n "${SAVE_ONLY_MODEL:-}" ]; then
     LAUNCH_CMD+=(--save_only_model)

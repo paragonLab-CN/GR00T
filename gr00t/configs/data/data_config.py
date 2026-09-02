@@ -42,6 +42,11 @@ class SingleDatasetConfig:
 
     dataset_type: str = "physical_embodiment"
 
+    # FLARE-VLA indexed self-distillation inputs. These are required when
+    # dataset_type == "flare_distillation" and are ignored otherwise.
+    distillation_index_path: Optional[str] = None
+    teacher_records_path: Optional[str] = None
+
     # Optional validation dataset path for open-loop evaluation
     # If not provided, falls back to dataset_paths for evaluation
     val_dataset_path: Optional[str] = None

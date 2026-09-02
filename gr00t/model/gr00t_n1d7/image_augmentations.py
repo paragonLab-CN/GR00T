@@ -440,6 +440,15 @@ def build_image_transformations_albumentations(
             )
         )
 
+    # Optional whole-image blur/noise augmentations (sensor-noise style).
+    # Controlled via extra_augmentation_config keys; empty by default.
+    gaussian_blur_cfg = extra_augmentation_config.get("gaussian_blur_params")
+    if gaussian_blur_cfg:
+        train_transform_list.append(A.GaussianBlur(**gaussian_blur_cfg))
+    motion_blur_cfg = extra_augmentation_config.get("motion_blur_params")
+    if motion_blur_cfg:
+        train_transform_list.append(A.MotionBlur(**motion_blur_cfg))
+
     train_transform = A.ReplayCompose(train_transform_list, p=1.0)
 
     # === Mask-based augmentations (applied per-frame, NOT in ReplayCompose) ===

@@ -168,3 +168,22 @@ offline_open_loop_eval_plots/
 # Generic model/data folders
 /models
 /data
+# Local checkpoints and training outputs
+/checkpoints/
+/outputs/
+/local_wheels/
+
+# Local datasets
+/examples/LIBERO/libero_plus_lerobot/
+
+# Virtual environments anywhere
+.venv/
+**/.venv/
+
+# Model weights
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+
+

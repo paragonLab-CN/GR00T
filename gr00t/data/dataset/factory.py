@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
 from gr00t.configs.base_config import Config
+from gr00t.data.dataset.flare_distillation_dataset import FlareDistillationDataset
 from gr00t.data.dataset.sharded_mixture_dataset import ShardedMixtureDataset
 from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
 from gr00t.data.embodiment_tags import EmbodimentTag
@@ -50,6 +50,28 @@ class DatasetFactory:
             desc="Initializing datasets",
         ):
             datasets = []
+            dataset_type = getattr(dataset_spec, "dataset_type", "physical_embodiment")
+            if not isinstance(dataset_type, str):
+                # Preserve compatibility with older/mock dataset specs that do
+                # not define dataset_type explicitly.
+                dataset_type = "physical_embodiment"
+            if dataset_type == "flare_distillation":
+                if len(dataset_spec.dataset_paths) != 1:
+                    raise ValueError(
+                        "A flare_distillation dataset spec must contain exactly one "
+                        f"dataset path, got {dataset_spec.dataset_paths}"
+                    )
+                if not dataset_spec.distillation_index_path:
+                    raise ValueError(
+                        "distillation_index_path is required when "
+                        "dataset_type='flare_distillation'"
+                    )
+                if not dataset_spec.teacher_records_path:
+                    raise ValueError(
+                        "teacher_records_path is required when "
+                        "dataset_type='flare_distillation'"
+                    )
+
             for dataset_path in dataset_spec.dataset_paths:
                 embodiment_tag = dataset_spec.embodiment_tag
                 assert embodiment_tag is not None, "Embodiment tag is required"
@@ -62,21 +84,35 @@ class DatasetFactory:
                     generate_stats(dataset_path)
                     generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
                 barrier()
-                dataset = ShardedSingleStepDataset(
-                    dataset_path=dataset_path,
-                    embodiment_tag=EmbodimentTag(embodiment_tag),
-                    modality_configs=self.config.data.modality_configs[embodiment_tag],
-                    video_backend=self.config.data.video_backend,
-                    shard_size=self.config.data.shard_size,
-                    episode_sampling_rate=self.config.data.episode_sampling_rate,
-                    seed=self.config.data.seed,
-                    allow_padding=self.config.data.allow_padding,
-                )
+
+                common_kwargs = {
+                    "dataset_path": dataset_path,
+                    "embodiment_tag": EmbodimentTag(embodiment_tag),
+                    "modality_configs": self.config.data.modality_configs[embodiment_tag],
+                    "video_backend": self.config.data.video_backend,
+                    "shard_size": self.config.data.shard_size,
+                    "seed": self.config.data.seed,
+                    "allow_padding": self.config.data.allow_padding,
+                }
+                if dataset_type == "flare_distillation":
+                    dataset = FlareDistillationDataset(
+                        **common_kwargs,
+                        distillation_index_path=dataset_spec.distillation_index_path,
+                        teacher_records_path=dataset_spec.teacher_records_path,
+                    )
+                elif dataset_type == "physical_embodiment":
+                    dataset = ShardedSingleStepDataset(
+                        **common_kwargs,
+                        episode_sampling_rate=self.config.data.episode_sampling_rate,
+                    )
+                else:
+                    raise ValueError(f"Unsupported dataset_type={dataset_type!r}")
                 datasets.append(dataset)
-            dataset_lengths = np.array([len(dataset) for dataset in datasets])
-            dataset_relative_lengths = dataset_lengths / dataset_lengths.sum()
-            for dataset, relative_length in zip(datasets, dataset_relative_lengths):
-                weight = relative_length * dataset_spec.mix_ratio
+            # mix_ratio is the final sampling weight (already encodes the
+            # relative dataset sizes); do not multiply by dataset relative
+            # length again, which would double-compress the smaller dataset.
+            for dataset in datasets:
+                weight = dataset_spec.mix_ratio / dataset.supervised_steps
                 all_datasets.append(dataset)
                 all_weights.append(weight)
 

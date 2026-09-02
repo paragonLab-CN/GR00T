@@ -102,13 +102,38 @@ class Config:
         # Check dataset path(s)
         embodiment_tags = set()
         for d_cfg in self.data.datasets:
-            # (Disable missing data check because we now support caching PDX data sources.)
-            # if not Path(d_cfg.dataset_path).exists():
-            #     raise ValueError(f"Dataset path does not exist: {d_cfg.dataset_path}")
-            if d_cfg.dataset_type == "physical_embodiment" and not d_cfg.embodiment_tag:
-                raise ValueError(f"Embodiment tag is empty for dataset {d_cfg.dataset_path}")
-            if d_cfg.embodiment_tag is not None:
-                embodiment_tags.add(d_cfg.embodiment_tag)
+            # (Disable general missing-data checks because some workflows support
+            # cached remote data sources. FLARE sidecar files are local-only and
+            # are validated explicitly below.)
+            if d_cfg.dataset_type not in {"physical_embodiment", "flare_distillation"}:
+                raise ValueError(f"Unsupported dataset_type: {d_cfg.dataset_type!r}")
+            if not d_cfg.embodiment_tag:
+                raise ValueError(
+                    f"Embodiment tag is empty for dataset paths {d_cfg.dataset_paths}"
+                )
+            if d_cfg.dataset_type == "flare_distillation":
+                if len(d_cfg.dataset_paths) != 1:
+                    raise ValueError(
+                        "flare_distillation requires exactly one original LeRobot "
+                        f"dataset path, got {d_cfg.dataset_paths}"
+                    )
+                if not d_cfg.distillation_index_path:
+                    raise ValueError(
+                        "flare_distillation requires distillation_index_path"
+                    )
+                if not d_cfg.teacher_records_path:
+                    raise ValueError(
+                        "flare_distillation requires teacher_records_path"
+                    )
+                for sidecar in [
+                    d_cfg.distillation_index_path,
+                    d_cfg.teacher_records_path,
+                ]:
+                    if not Path(sidecar).is_file():
+                        raise FileNotFoundError(
+                            f"FLARE distillation sidecar does not exist: {sidecar}"
+                        )
+            embodiment_tags.add(d_cfg.embodiment_tag)
 
         stripped_modality_configs = {}
         for embodiment_tag in embodiment_tags:
