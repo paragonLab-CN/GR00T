@@ -26,6 +26,7 @@ from gr00t.configs.base_config import get_default_config
 from gr00t.configs.finetune_config import FinetuneConfig
 from gr00t.data.dataset.flare_sidecars import resolve_flare_distillation_sidecars
 from gr00t.experiment.experiment import run
+from gr00t.experiment.flare_config_validation import validate_reference_config
 
 
 # Make sure the user provided modality config is registered.
@@ -209,6 +210,9 @@ if __name__ == "__main__":
 
     config.training.save_only_model = ft_config.save_only_model
     config.training.skip_weight_loading = ft_config.skip_weight_loading
+
+    config.validate()
+    validate_reference_config(config, flare_sidecars)
 
     if ft_config.validate_config_only:
         resolved = [

@@ -16,8 +16,10 @@ Checks (any failure -> non-zero exit):
   4. Experiment config (jitter on, blur p=0.5/0.3): over 100 paired samples with
      identical random seeds (=> same crop + same jitter draws), the blur variant
      is measurably softer than the no-blur control.
-  5. The eval transform stays deterministic and free of jitter/blur.
-  6. save_pretrained -> from_pretrained round-trip preserves the config.
+  5. Gaussian/Motion blur are sampled independently and one replay is reused
+     across both views and all temporal frames.
+  6. The eval transform stays deterministic and free of jitter/blur.
+  7. save_pretrained -> from_pretrained round-trip preserves the config.
 
 Usage: .venv/bin/python scripts/flare/check_augmentation_pipeline.py
 """
@@ -231,30 +233,64 @@ def main() -> None:
     print("[PASS] 4. experiment config (jitter + gaussian p=0.5 + motion p=0.3) "
           "softens real pixels vs matched no-blur control")
 
-    # ---- Check 5: eval transform stays deterministic ----
+    # ---- Check 5: independent blur sampling + view/time replay ----
+    from gr00t.model.gr00t_n1d7.image_augmentations import apply_with_replay
+
+    observed_patterns = set()
+    for seed in range(200):
+        random.seed(seed)
+        np.random.seed(seed)
+        transformed, replay = apply_with_replay(exp_tf, [frame, frame, frame, frame])
+        if not all(
+            np.array_equal(transformed[0].numpy(), item.numpy()) for item in transformed[1:]
+        ):
+            fail(
+                "5. identical inputs diverged across the simulated "
+                "two-view/two-timestep replay"
+            )
+        applied = {}
+        for item in replay["transforms"]:
+            name = item["__class_fullname__"].rsplit(".", 1)[-1]
+            if name in {"GaussianBlur", "MotionBlur"}:
+                applied[name] = bool(item["applied"])
+        if set(applied) != {"GaussianBlur", "MotionBlur"}:
+            fail(f"5. replay is missing blur decisions: {applied}")
+        observed_patterns.add((applied["GaussianBlur"], applied["MotionBlur"]))
+    if (True, False) not in observed_patterns or (False, True) not in observed_patterns:
+        fail(
+            "5. did not observe independent Gaussian/Motion decisions; "
+            f"patterns={sorted(observed_patterns)}"
+        )
+    print(
+        "[PASS] 5. Gaussian/Motion blur are independently sampled and one replay "
+        "is shared across simulated front/wrist views and temporal frames "
+        f"(patterns={sorted(observed_patterns)})"
+    )
+
+    # ---- Check 6: eval transform stays deterministic ----
     eval_names = check_transforms_of(processor.eval_image_transform, "eval")
     if any(c in eval_names for c in ("ColorJitter", "GaussianBlur", "MotionBlur", "Blur")):
-        fail("5. eval transform contains augmentation transforms")
+        fail("6. eval transform contains augmentation transforms")
     out1 = apply_once(processor.eval_image_transform, frame, seed=0)
     out2 = apply_once(processor.eval_image_transform, frame, seed=123)
     if not np.array_equal(out1, out2):
-        fail("5. eval transform is not deterministic")
-    print("[PASS] 5. eval transform deterministic, no jitter/blur")
+        fail("6. eval transform is not deterministic")
+    print("[PASS] 6. eval transform deterministic, no jitter/blur")
 
-    # ---- Check 6: save_pretrained -> from_pretrained round-trip ----
+    # ---- Check 7: save_pretrained -> from_pretrained round-trip ----
     with tempfile.TemporaryDirectory() as tmp:
         saved = processor.save_pretrained(tmp)
-        print(f"[INFO] 6. saved processor to {saved}")
+        print(f"[INFO] 7. saved processor to {saved}")
         saved_cfg = json.loads(Path(tmp, "processor_config.json").read_text())
         if saved_cfg["processor_kwargs"].get("extra_augmentation_config") != EXTRA_AUG:
-            fail("6. save_pretrained did not serialize extra_augmentation_config")
+            fail("7. save_pretrained did not serialize extra_augmentation_config")
         from transformers import AutoProcessor
 
         reloaded = AutoProcessor.from_pretrained(tmp)
         if reloaded.extra_augmentation_config != EXTRA_AUG:
-            fail("6. round-trip lost extra_augmentation_config: "
+            fail("7. round-trip lost extra_augmentation_config: "
                  f"{reloaded.extra_augmentation_config!r}")
-    print("[PASS] 6. save_pretrained -> from_pretrained round-trip preserves config")
+    print("[PASS] 7. save_pretrained -> from_pretrained round-trip preserves config")
 
     print("========== ALL CHECKS PASSED ==========")
 

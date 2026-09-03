@@ -47,6 +47,11 @@ SUITES="${SUITES:-libero_spatial,libero_object,libero_goal,libero_10}"
 # 0表示评测全部任务；正数表示只取前N个任务，用于 smoke test
 TASK_LIMIT="${TASK_LIMIT:-0}"
 
+# 可选：直接复用既有任务清单，避免重新抽样。
+TASK_FILE_SOURCE="${TASK_FILE_SOURCE:-}"
+# 非零时校验最终任务数；本实验固定为历史 112 任务。
+EXPECTED_TASK_COUNT="${EXPECTED_TASK_COUNT:-0}"
+
 # 0表示每个任务结束后删除视频，避免大量视频占用磁盘
 KEEP_VIDEOS="${KEEP_VIDEOS:-0}"
 
@@ -75,6 +80,14 @@ echo "Seed               : ${SEED}"
 echo "Task limit         : ${TASK_LIMIT}"
 echo "============================================================"
 
+if [[ -n "${TASK_FILE_SOURCE}" ]]; then
+    if [[ ! -f "${TASK_FILE_SOURCE}" ]]; then
+        echo "Task manifest does not exist: ${TASK_FILE_SOURCE}" >&2
+        exit 1
+    fi
+    cp "${TASK_FILE_SOURCE}" "${TASK_FILE}"
+    echo "Reused task list   : ${TASK_FILE_SOURCE}"
+else
 "${LIBERO_PLUS_PY}" - \
     "${CLASSIFICATION_JSON}" \
     "${TASK_FILE}" \
@@ -162,8 +175,14 @@ for suite_name in SUITES:
     print(f"  {suite_name}: {n} tasks")
 print(f"Saved task list     : {output_path}")
 PY
+fi
 
 NUM_TASKS="$(wc -l < "${TASK_FILE}")"
+if [[ "${EXPECTED_TASK_COUNT}" != "0" && "${NUM_TASKS}" != "${EXPECTED_TASK_COUNT}" ]]; then
+    echo "Task manifest count mismatch: ${NUM_TASKS} != ${EXPECTED_TASK_COUNT}" >&2
+    exit 1
+fi
+echo "Task manifest SHA256: $(sha256sum "${TASK_FILE}" | cut -d ' ' -f 1)"
 
 echo
 echo "============================================================"
