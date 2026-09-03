@@ -1,0 +1,27 @@
+# large data
+data/
+datasets/
+outputs/
+checkpoints/
+logs/
+wandb/
+
+# model / tensor / dataset files
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.parquet
+*.mp4
+*.npy
+*.npz
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# system
+.DS_Store
