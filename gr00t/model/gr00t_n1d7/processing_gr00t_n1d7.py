@@ -681,6 +681,7 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "use_albumentations": self.use_albumentations,
                 "random_rotation_angle": self.random_rotation_angle,
                 "color_jitter_params": self.color_jitter_params,
+                "extra_augmentation_config": self.extra_augmentation_config,
                 "shortest_image_edge": self.shortest_image_edge,
                 "crop_fraction": self.crop_fraction,
                 "letter_box_transform": self.letter_box_transform,
@@ -763,6 +764,7 @@ class Gr00tN1d7Processor(BaseProcessor):
             override_keys = [
                 "random_rotation_angle",
                 "color_jitter_params",
+                "extra_augmentation_config",
                 "use_relative_action",
                 "exclude_state",
                 "state_dropout_prob",
