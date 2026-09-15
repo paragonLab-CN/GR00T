@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Preflight ten real 54:10 GT-replay batches before formal training."""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Mapping
+import os
+from pathlib import Path
+
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+from check_augmentation_pipeline import COLOR_JITTER, EXTRA_AUG, build_processor
+from gr00t.configs.base_config import get_default_config
+from gr00t.data.dataset.flare_distillation_dataset import FlareDistillationDataset
+from gr00t.data.dataset.sharded_mixture_dataset import (
+    FIXED_BATCH_SOURCE_KEY,
+    FixedRatioShardedMixtureDataset,
+)
+from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
+from gr00t.data.types import EmbodimentTag
+from gr00t.experiment.trainer import FixedSourceCountCollator
+import torch
+from torch.utils.data import DataLoader
+
+
+GR00T_ROOT = Path(__file__).resolve().parents[2]
+DATASET_PATH = GR00T_ROOT / "examples/LIBERO/libero_plus_lerobot"
+SIDECAR_DIR = Path(
+    "/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/distillation_dataset"
+)
+EXPECTED_COUNTS = {"gt": 54, "teacher": 10}
+
+
+def _assert_finite(value, path="batch"):
+    if torch.is_tensor(value):
+        if not torch.isfinite(value).all():
+            raise RuntimeError(f"Non-finite tensor at {path}")
+    elif isinstance(value, Mapping):
+        for key, child in value.items():
+            _assert_finite(child, f"{path}.{key}")
+
+
+class AuditCollator:
+    def __init__(self, collator):
+        self.validating_collator = FixedSourceCountCollator(
+            collator, EXPECTED_COUNTS
+        )
+
+    def __call__(self, features):
+        sources = [feature[FIXED_BATCH_SOURCE_KEY] for feature in features]
+        batch = self.validating_collator(features)
+        batch["_preflight_sources"] = sources
+        return batch
+
+
+def main() -> None:
+    processor = build_processor(extra_augmentation_config=EXTRA_AUG)
+    processor.train()
+    if processor.color_jitter_params != COLOR_JITTER:
+        raise RuntimeError(
+            f"ColorJitter mismatch: {processor.color_jitter_params} != {COLOR_JITTER}"
+        )
+    if processor.extra_augmentation_config != EXTRA_AUG:
+        raise RuntimeError(
+            "Extra augmentation mismatch: "
+            f"{processor.extra_augmentation_config} != {EXTRA_AUG}"
+        )
+    transform_names = [
+        type(transform).__name__ for transform in processor.train_image_transform.transforms
+    ]
+    for expected_transform in ("ColorJitter", "GaussianBlur", "MotionBlur"):
+        if expected_transform not in transform_names:
+            raise RuntimeError(
+                f"{expected_transform} missing from training transforms: {transform_names}"
+            )
+
+    modality = get_default_config().data.modality_configs["libero_sim"]
+    common = {
+        "dataset_path": DATASET_PATH,
+        "embodiment_tag": EmbodimentTag("libero_sim"),
+        "modality_configs": modality,
+        "video_backend": "torchcodec",
+        "shard_size": 128,
+        "seed": 42,
+        "allow_padding": True,
+    }
+    gt_dataset = ShardedSingleStepDataset(
+        **common,
+        episode_sampling_rate=0.1,
+    )
+    teacher_dataset = FlareDistillationDataset(
+        **common,
+        distillation_index_path=SIDECAR_DIR / "distillation_index.jsonl",
+        teacher_records_path=SIDECAR_DIR / "teacher_records_enriched.pt",
+    )
+    if teacher_dataset.teacher_horizon != 8:
+        raise RuntimeError(
+            f"Teacher horizon must remain 8, got {teacher_dataset.teacher_horizon}"
+        )
+    if teacher_dataset.processor_action_horizon != 16:
+        raise RuntimeError(
+            "GT processor horizon must remain 16, got "
+            f"{teacher_dataset.processor_action_horizon}"
+        )
+
+    replay_dataset = FixedRatioShardedMixtureDataset(
+        datasets=[gt_dataset, teacher_dataset],
+        source_labels=["gt", "teacher"],
+        source_counts=[54, 10],
+        processor=processor,
+        seed=42,
+        num_shards_per_epoch=1000,
+        override_pretraining_statistics=True,
+        prefetch_shards=False,
+    )
+    loader = DataLoader(
+        replay_dataset,
+        batch_size=64,
+        num_workers=0,
+        collate_fn=AuditCollator(processor.collator),
+    )
+
+    for batch_index, batch in enumerate(loader, start=1):
+        sources = batch.pop("_preflight_sources")
+        if Counter(sources) != EXPECTED_COUNTS:
+            raise RuntimeError(
+                f"Batch {batch_index} source mismatch: {Counter(sources)}"
+            )
+        _assert_finite(batch)
+
+        model_inputs = batch["inputs"]
+        action = model_inputs["action"]
+        action_mask = model_inputs["action_mask"]
+        if action.shape != action_mask.shape or tuple(action.shape) != (64, 40, 132):
+            raise RuntimeError(
+                f"Batch {batch_index} action shapes mismatch: "
+                f"action={tuple(action.shape)}, mask={tuple(action_mask.shape)}"
+            )
+        teacher_indices = [
+            index for index, source in enumerate(sources) if source == "teacher"
+        ]
+        gt_indices = [index for index, source in enumerate(sources) if source == "gt"]
+        if action_mask[teacher_indices, 8:].count_nonzero().item() != 0:
+            raise RuntimeError(f"Batch {batch_index} teacher mask leaks beyond step 8")
+        if action[teacher_indices, 8:].count_nonzero().item() != 0:
+            raise RuntimeError(f"Batch {batch_index} teacher action leaks beyond step 8")
+        if not torch.all(
+            action_mask[teacher_indices, :8].sum(dim=(1, 2)) > 0
+        ):
+            raise RuntimeError(f"Batch {batch_index} teacher prefix is unsupervised")
+        if not torch.all(action_mask[gt_indices, 8:16].sum(dim=(1, 2)) > 0):
+            raise RuntimeError(
+                f"Batch {batch_index} GT samples lack valid step 9-16 supervision"
+            )
+        if action_mask[gt_indices, 16:].count_nonzero().item() != 0:
+            raise RuntimeError(f"Batch {batch_index} GT mask leaks beyond step 16")
+        print(
+            f"[PASS] real batch {batch_index}/10: GT=54 teacher=10, "
+            f"action={tuple(action.shape)}, finite tensors, masks 16/8"
+        )
+        if batch_index == 10:
+            break
+
+    print(
+        "[PASS] augmentation: ColorJitter 0.5/0.6/0.7/0.12, "
+        "GaussianBlur p=0.5, MotionBlur p=0.3"
+    )
+    print("========== ALL FIXED GT-REPLAY PREFLIGHT CHECKS PASSED ==========")
+
+
+if __name__ == "__main__":
+    main()
+

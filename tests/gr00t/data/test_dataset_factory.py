@@ -33,6 +33,8 @@ def _make_mock_config():
     """Create a minimal mock training Config."""
     config = MagicMock()
     config.training.eval_strategy = "no"
+    config.data.fixed_gt_samples_per_batch = None
+    config.data.fixed_teacher_samples_per_batch = None
     config.data.mode = "single_turn"
     config.data.video_backend = "torchcodec"
     config.data.shard_size = 128
@@ -83,6 +85,7 @@ class TestDatasetFactory:
         mock_dataset.shard_lengths = np.full(10, 100)
         mock_dataset.get_shard_length = MagicMock(return_value=100)
         mock_dataset.embodiment_tag = type("ET", (), {"value": "new_embodiment"})()
+        mock_dataset.supervised_steps = 1
         mock_dataset.get_dataset_statistics.return_value = {
             "state": {
                 "x": {
@@ -117,6 +120,64 @@ class TestDatasetFactory:
 
         assert train_ds is not None
         assert eval_ds is None
+
+
+    def test_fixed_mode_bypasses_probabilistic_mixture(self):
+        from gr00t.data.dataset.factory import DatasetFactory
+        from gr00t.data.dataset.sharded_mixture_dataset import FixedRatioShardedMixtureDataset
+
+        config = _make_mock_config()
+        physical_spec = config.data.datasets[0]
+        physical_spec.dataset_type = "physical_embodiment"
+        teacher_spec = MagicMock()
+        teacher_spec.dataset_paths = ["/fake/dataset_path"]
+        teacher_spec.embodiment_tag = "new_embodiment"
+        teacher_spec.mix_ratio = 0.01
+        teacher_spec.dataset_type = "flare_distillation"
+        teacher_spec.distillation_index_path = "/fake/index.jsonl"
+        teacher_spec.teacher_records_path = "/fake/teacher.pt"
+        config.data.datasets = [physical_spec, teacher_spec]
+        config.data.fixed_gt_samples_per_batch = 54
+        config.data.fixed_teacher_samples_per_batch = 10
+
+        mock_dataset = MagicMock()
+        mock_dataset.__len__ = MagicMock(return_value=10)
+        mock_dataset.get_shard_length = MagicMock(return_value=100)
+        mock_dataset.embodiment_tag = type("ET", (), {"value": "new_embodiment"})()
+        mock_dataset.supervised_steps = 16
+        mock_dataset.get_dataset_statistics.return_value = {
+            "state": {
+                "x": {
+                    "min": [0.0],
+                    "max": [1.0],
+                    "mean": [0.5],
+                    "std": [0.2],
+                    "q01": [0.05],
+                    "q99": [0.95],
+                }
+            }
+        }
+        processor = MagicMock()
+        processor.set_statistics = MagicMock()
+
+        with (
+            patch("gr00t.data.dataset.factory.generate_stats"),
+            patch("gr00t.data.dataset.factory.generate_rel_stats"),
+            patch("gr00t.data.dataset.factory.barrier"),
+            patch(
+                "gr00t.data.dataset.factory.ShardedSingleStepDataset",
+                return_value=mock_dataset,
+            ),
+            patch(
+                "gr00t.data.dataset.factory.FlareDistillationDataset",
+                return_value=mock_dataset,
+            ),
+            patch("torch.distributed.is_initialized", return_value=False),
+        ):
+            train_ds, _ = DatasetFactory(config).build(processor)
+
+        assert isinstance(train_ds, FixedRatioShardedMixtureDataset)
+        assert train_ds.fixed_source_counts == {"gt": 54, "teacher": 10}
 
     def test_build_rejects_eval_strategy(self):
         from gr00t.data.dataset.factory import DatasetFactory

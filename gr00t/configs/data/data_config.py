@@ -91,6 +91,11 @@ class DataConfig:
     multiprocessing_context: str = "fork"  # Options: "fork", "spawn", and "forkserver"
     allow_padding: bool = False
 
+    # Optional strict per-device micro-batch composition. Both values must be
+    # provided together. These counts bypass probabilistic mixture sampling.
+    fixed_gt_samples_per_batch: Optional[int] = None
+    fixed_teacher_samples_per_batch: Optional[int] = None
+
     # Subsample ratio for the dataset
     subsample_ratio: float = 1.0
 

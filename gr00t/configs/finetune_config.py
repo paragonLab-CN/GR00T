@@ -59,6 +59,12 @@ class FinetuneConfig:
     teacher_mix_ratio: float = 0.2
     """Target sampling fraction for the teacher-only source when full GT is retained."""
 
+    fixed_gt_samples_per_batch: int | None = None
+    """Optional exact number of physical GT samples in every per-device micro-batch."""
+
+    fixed_teacher_samples_per_batch: int | None = None
+    """Optional exact number of FLARE teacher samples in every per-device micro-batch."""
+
     validate_config_only: bool = False
     """Build and validate the resolved training configuration, then exit before loading the model."""
 

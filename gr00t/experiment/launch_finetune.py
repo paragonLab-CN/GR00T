@@ -64,6 +64,14 @@ if __name__ == "__main__":
         teacher_records_path=ft_config.teacher_records_path,
     )
     flare_requested = flare_sidecars is not None
+    fixed_batch_requested = (
+        ft_config.fixed_gt_samples_per_batch is not None
+        or ft_config.fixed_teacher_samples_per_batch is not None
+    )
+    if fixed_batch_requested and not ft_config.keep_full_gt_dataset:
+        raise ValueError(
+            "Fixed GT replay requires --keep_full_gt_dataset so both sources are available"
+        )
     require_mixed_data = os.environ.get("FLARE_REQUIRE_MIXED_DATA", "0") == "1"
     if require_mixed_data and not ft_config.keep_full_gt_dataset:
         raise RuntimeError(
@@ -207,6 +215,8 @@ if __name__ == "__main__":
     config.data.episode_sampling_rate = ft_config.episode_sampling_rate
     config.data.num_shards_per_epoch = ft_config.num_shards_per_epoch
     config.data.allow_padding = ft_config.allow_padding
+    config.data.fixed_gt_samples_per_batch = ft_config.fixed_gt_samples_per_batch
+    config.data.fixed_teacher_samples_per_batch = ft_config.fixed_teacher_samples_per_batch
 
     config.training.save_only_model = ft_config.save_only_model
     config.training.skip_weight_loading = ft_config.skip_weight_loading
@@ -227,6 +237,18 @@ if __name__ == "__main__":
         ]
         print("========== Resolved training datasets ==========")
         print(json.dumps(resolved, indent=2))
+        if config.data.fixed_gt_samples_per_batch is not None:
+            fixed_total = (
+                config.data.fixed_gt_samples_per_batch
+                + config.data.fixed_teacher_samples_per_batch
+            )
+            print(
+                "Fixed per-device batch composition: "
+                f"GT={config.data.fixed_gt_samples_per_batch}, "
+                f"teacher={config.data.fixed_teacher_samples_per_batch}, "
+                f"total={fixed_total}, "
+                f"teacher_fraction={config.data.fixed_teacher_samples_per_batch / fixed_total:.6%}"
+            )
         print("Configuration validation completed; training was not started.")
         raise SystemExit(0)
 

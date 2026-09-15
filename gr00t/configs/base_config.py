@@ -153,6 +153,41 @@ class Config:
         if total_ratio <= 0:
             raise ValueError("Sum of mix_ratio must be greater than zero")
 
+        fixed_gt = self.data.fixed_gt_samples_per_batch
+        fixed_teacher = self.data.fixed_teacher_samples_per_batch
+        if (fixed_gt is None) != (fixed_teacher is None):
+            raise ValueError(
+                "fixed_gt_samples_per_batch and fixed_teacher_samples_per_batch "
+                "must be provided together"
+            )
+        if fixed_gt is not None and fixed_teacher is not None:
+            if fixed_gt <= 0 or fixed_teacher <= 0:
+                raise ValueError("Fixed GT and teacher sample counts must both be positive")
+            dataset_types = [dataset.dataset_type for dataset in self.data.datasets]
+            if dataset_types.count("physical_embodiment") != 1 or dataset_types.count(
+                "flare_distillation"
+            ) != 1:
+                raise ValueError(
+                    "Fixed GT replay requires exactly one physical_embodiment and "
+                    "one flare_distillation data source"
+                )
+            if self.training.num_gpus <= 0:
+                raise ValueError("num_gpus must be positive")
+            if self.training.global_batch_size % self.training.num_gpus != 0:
+                raise ValueError(
+                    "global_batch_size must be divisible by num_gpus for fixed GT replay"
+                )
+            per_device_batch_size = (
+                self.training.batch_size
+                if self.training.batch_size is not None
+                else self.training.global_batch_size // self.training.num_gpus
+            )
+            if fixed_gt + fixed_teacher != per_device_batch_size:
+                raise ValueError(
+                    "Fixed source counts must sum to the per-device batch size: "
+                    f"{fixed_gt} + {fixed_teacher} != {per_device_batch_size}"
+                )
+
         # Fill in default values for action configs
         for embodiment_tag in self.data.modality_configs:
             # Fill in default values for action representation, type and format

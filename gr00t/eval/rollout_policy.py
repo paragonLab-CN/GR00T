@@ -268,6 +268,7 @@ def sample_k_candidate_actions(
     rollout_step: int = 0,
     verbose: bool = False,
     candidate_save_dir: str | None = None,
+    diffusion_noise_seed: int | None = None,
 ):
     """Sample K candidate action trajectories for the same observation.
 
@@ -279,7 +280,12 @@ def sample_k_candidate_actions(
     Later, replace `chosen_idx = 0` with the LeWM best-index.
     """
     if k <= 1:
-        return policy.get_action(observations)
+        options = (
+            {"initial_noise_seed": int(diffusion_noise_seed)}
+            if diffusion_noise_seed is not None
+            else None
+        )
+        return policy.get_action(observations, options)
 
     candidate_actions: list[dict[str, np.ndarray]] = []
     candidate_infos: list[Any] = []
@@ -289,9 +295,13 @@ def sample_k_candidate_actions(
         # rollout_step is included so the same candidate index does not reuse
         # exactly the same RNG state at every environment step.
         seed = int(base_seed) + int(rollout_step) * 100000 + int(candidate_idx)
-        _seed_candidate_sampling(seed)
+        options = None
+        if diffusion_noise_seed is None:
+            _seed_candidate_sampling(seed)
+        else:
+            options = {"initial_noise_seed": int(diffusion_noise_seed) + candidate_idx}
 
-        actions_i, info_i = policy.get_action(observations)
+        actions_i, info_i = policy.get_action(observations, options)
         candidate_actions.append(actions_i)
         candidate_infos.append(info_i)
     
@@ -360,6 +370,7 @@ def run_rollout_gymnasium_policy(
     candidate_base_seed: int = 2026,
     candidate_verbose: bool = False,
     candidate_save_dir: str | None = None,
+    diffusion_noise_base_seed: int | None = None,
 ) -> Any:
     """Run policy rollouts in parallel environments.
 
@@ -378,7 +389,15 @@ def run_rollout_gymnasium_policy(
     """
     start_time = time.time()
     n_episodes = max(n_episodes, n_envs)
+    if diffusion_noise_base_seed is not None and n_envs != 1:
+        raise ValueError("Fixed per-episode diffusion noise currently requires n_envs=1")
     print(f"Running collecting {n_episodes} episodes for {env_name} with {n_envs} vec envs")
+    if diffusion_noise_base_seed is not None:
+        print(
+            "Fixed server-side diffusion noise: "
+            f"task_base={diffusion_noise_base_seed}, "
+            "request_seed=task_base+episode_index*10000+action_chunk_index"
+        )
 
     env_fns = [
         partial(
@@ -423,6 +442,13 @@ def run_rollout_gymnasium_policy(
 
     pbar = tqdm(total=n_episodes, desc="Episodes")
     while completed_episodes < n_episodes:
+        diffusion_noise_seed = None
+        if diffusion_noise_base_seed is not None:
+            diffusion_noise_seed = (
+                int(diffusion_noise_base_seed)
+                + int(completed_episodes) * 10_000
+                + int(current_lengths[0])
+            )
         actions, _ = sample_k_candidate_actions(
             policy=policy,
             observations=observations,
@@ -431,6 +457,7 @@ def run_rollout_gymnasium_policy(
             rollout_step=i,
             verbose=candidate_verbose and i < 3,
             candidate_save_dir=candidate_save_dir,
+            diffusion_noise_seed=diffusion_noise_seed,
         )
         next_obs, rewards, terminations, truncations, env_infos = env.step(actions)
         # NOTE (FY): Currently we don't properly handle policy reset. For now, our policy are stateless,
@@ -593,6 +620,7 @@ def run_gr00t_sim_policy(
     candidate_base_seed: int = 2026,
     candidate_verbose: bool = False,
     candidate_save_dir: str | None = None,
+    diffusion_noise_base_seed: int | None = None,
 ):
     # seed_everything resolves `None` via the GR00T_EVAL_SEED env var and is a
     # no-op when that is also unset, so the historical non-deterministic
@@ -641,6 +669,7 @@ def run_gr00t_sim_policy(
         candidate_base_seed=candidate_base_seed,
         candidate_verbose=candidate_verbose,
         candidate_save_dir=candidate_save_dir,
+        diffusion_noise_base_seed=diffusion_noise_base_seed,
     )
     print("Video saved to: ", wrapper_configs.video.video_dir)
     return results
@@ -703,6 +732,10 @@ class RolloutConfig:
     candidate_save_dir: str | None = None
     """Directory used to save FLARE candidate action .pt files. If None, nothing is saved."""
 
+    diffusion_noise_base_seed: int | None = None
+    """Optional task-level seed for explicit server-side diffusion noise. Each request
+    derives its seed from this value plus episode and action-chunk indices."""
+
 if __name__ == "__main__":
     args = tyro.cli(RolloutConfig)
 
@@ -733,6 +766,7 @@ if __name__ == "__main__":
         candidate_base_seed=args.candidate_base_seed,
         candidate_verbose=args.candidate_verbose,
         candidate_save_dir=args.candidate_save_dir,
+        diffusion_noise_base_seed=args.diffusion_noise_base_seed,
     )
     print("results: ", results)
     print("success rate: ", np.mean(results[1]))

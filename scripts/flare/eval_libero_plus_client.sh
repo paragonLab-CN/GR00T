@@ -34,6 +34,8 @@ N_ENVS="${N_ENVS:-1}"
 SEED="${SEED:-2026}"
 MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-720}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-8}"
+DIFFUSION_SEED="${DIFFUSION_SEED:-}"
+DIFFUSION_TASK_STRIDE=1000000
 
 # 每个套件 × 每个扰动类别抽多少任务
 TASKS_PER_CATEGORY="${TASKS_PER_CATEGORY:-4}"
@@ -71,6 +73,11 @@ export PYOPENGL_PLATFORM=egl
 export LIBERO_CONFIG_PATH="${LIBERO_PLUS_CONFIG_DIR}"
 
 cd "${GR00T_ROOT}"
+
+if [[ -n "${DIFFUSION_SEED}" && "${N_ENVS}" != "1" ]]; then
+    echo "Fixed paired diffusion noise requires N_ENVS=1" >&2
+    exit 1
+fi
 
 echo "============================================================"
 echo "Generating LIBERO-Plus task list (stratified sampling)"
@@ -194,6 +201,7 @@ echo "Total episodes     : $((NUM_TASKS * N_EPISODES))"
 echo "Seed               : ${SEED}"
 echo "Max episode steps  : ${MAX_EPISODE_STEPS}"
 echo "Action steps       : ${N_ACTION_STEPS}"
+echo "Diffusion seed     : ${DIFFUSION_SEED:-unfixed}"
 echo "Server port        : ${PORT}"
 echo "============================================================"
 
@@ -202,12 +210,25 @@ TASK_NUMBER=0
 while IFS=$'\t' read -r TASK TASK_LANGUAGE TASK_SUITE TASK_CATEGORY TASK_DIFFICULTY; do
     TASK_NUMBER=$((TASK_NUMBER + 1))
     TASK_NAME="${TASK#libero_sim/}"
+    TASK_DIFFUSION_SEED=""
+    if [[ -n "${DIFFUSION_SEED}" ]]; then
+        TASK_DIFFUSION_SEED=$((DIFFUSION_SEED + (TASK_NUMBER - 1) * DIFFUSION_TASK_STRIDE))
+    fi
 
     LOG_PATH="${LOG_DIR}/${TASK_NAME}.log"
     TASK_VIDEO_DIR="${VIDEO_DIR}/${TASK_NAME}"
 
+    LOG_COMPLETE=0
     if [[ "${RESUME}" == "1" && -f "${LOG_PATH}" ]] &&
-       grep -q "success rate:" "${LOG_PATH}"; then
+       grep -q "success rate:" "${LOG_PATH}" &&
+       grep -q "^results:" "${LOG_PATH}"; then
+        LOG_COMPLETE=1
+        if [[ -n "${TASK_DIFFUSION_SEED}" ]] &&
+           ! grep -Fq "task_base=${TASK_DIFFUSION_SEED}," "${LOG_PATH}"; then
+            LOG_COMPLETE=0
+        fi
+    fi
+    if [[ "${LOG_COMPLETE}" == "1" ]]; then
         echo
         echo "[SKIP ${TASK_NUMBER}/${NUM_TASKS}] ${TASK_NAME}"
         echo "Existing completed log: ${LOG_PATH}"
@@ -228,7 +249,13 @@ while IFS=$'\t' read -r TASK TASK_LANGUAGE TASK_SUITE TASK_CATEGORY TASK_DIFFICU
     echo "Task        : ${TASK}"
     echo "Instruction : ${TASK_LANGUAGE}"
     echo "Episodes    : ${N_EPISODES}"
+    echo "Noise seed  : ${TASK_DIFFUSION_SEED:-unfixed}"
     echo "============================================================"
+
+    DIFFUSION_ARGS=()
+    if [[ -n "${TASK_DIFFUSION_SEED}" ]]; then
+        DIFFUSION_ARGS=(--diffusion-noise-base-seed "${TASK_DIFFUSION_SEED}")
+    fi
 
     "${LIBERO_PLUS_PY}" gr00t/eval/rollout_policy.py \
         --n-episodes "${N_EPISODES}" \
@@ -240,6 +267,7 @@ while IFS=$'\t' read -r TASK TASK_LANGUAGE TASK_SUITE TASK_CATEGORY TASK_DIFFICU
         --n-envs "${N_ENVS}" \
         --seed "${SEED}" \
         --candidate-k 1 \
+        "${DIFFUSION_ARGS[@]}" \
         --video-dir "${TASK_VIDEO_DIR}" \
         2>&1 | tee "${LOG_PATH}"
 
@@ -260,7 +288,9 @@ fi
     "${OUTPUT_ROOT}" \
     "${N_EPISODES}" \
     "${MODEL_TAG}" \
-    "${SUMMARY_SUFFIX}" <<'PY'
+    "${SUMMARY_SUFFIX}" \
+    "${DIFFUSION_SEED}" <<'PY'
+import ast
 import csv
 import json
 import re
@@ -273,13 +303,14 @@ output_root = Path(sys.argv[1])
 n_episodes = int(sys.argv[2])
 model_tag = sys.argv[3]
 summary_suffix = sys.argv[4]
+diffusion_seed = None if sys.argv[5] == "" else int(sys.argv[5])
 
 log_dir = output_root / "logs"
 task_file = output_root / "tasks.tsv"
 
 rows = []
 
-for line in task_file.read_text(encoding="utf-8").splitlines():
+for task_index, line in enumerate(task_file.read_text(encoding="utf-8").splitlines()):
     if not line.strip():
         continue
 
@@ -300,6 +331,25 @@ for line in task_file.read_text(encoding="utf-8").splitlines():
     success_rate = float(matches[-1])
     successes = int(round(success_rate * n_episodes))
 
+    result_matches = re.findall(r"^results:\s*(.+)$", text, flags=re.MULTILINE)
+    if not result_matches:
+        raise RuntimeError(f"No episode results found in {log_path}")
+    try:
+        rollout_result = ast.literal_eval(result_matches[-1])
+        episode_successes = [bool(value) for value in rollout_result[1]]
+    except (SyntaxError, ValueError, TypeError, IndexError) as error:
+        raise RuntimeError(f"Invalid episode results in {log_path}") from error
+    if len(episode_successes) != n_episodes:
+        raise RuntimeError(
+            f"Expected {n_episodes} episode outcomes in {log_path}, "
+            f"got {len(episode_successes)}"
+        )
+    if sum(episode_successes) != successes:
+        raise RuntimeError(
+            f"Episode outcomes disagree with success rate in {log_path}"
+        )
+
+
     rows.append(
         {
             "task": task_name,
@@ -308,8 +358,12 @@ for line in task_file.read_text(encoding="utf-8").splitlines():
             "category": category,
             "difficulty": difficulty,
             "successes": successes,
+            "episode_successes": episode_successes,
             "episodes": n_episodes,
             "success_rate": success_rate,
+            "diffusion_noise_base_seed": (
+                None if diffusion_seed is None else diffusion_seed + task_index * 1_000_000
+            ),
         }
     )
 
@@ -351,8 +405,10 @@ with csv_path.open("w", encoding="utf-8", newline="") as f:
             "category",
             "difficulty",
             "successes",
+            "episode_successes",
             "episodes",
             "success_rate",
+            "diffusion_noise_base_seed",
         ],
     )
     writer.writeheader()
@@ -367,6 +423,20 @@ summary = {
     "total_episodes": total_episodes,
     "overall_success_rate": overall_success_rate,
     "macro_success_rate": macro_success_rate,
+    "diffusion_noise_protocol": (
+        {"mode": "unfixed"}
+        if diffusion_seed is None
+        else {
+            "mode": "explicit_per_request_seed",
+            "master_seed": diffusion_seed,
+            "task_stride": 1_000_000,
+            "episode_stride": 10_000,
+            "request_seed_formula": (
+                "master_seed + task_index*1000000 + "
+                "episode_index*10000 + action_chunk_index"
+            ),
+        }
+    ),
     "per_suite": per_suite,
     "per_category": per_category,
     "per_difficulty": per_difficulty,

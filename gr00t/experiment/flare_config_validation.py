@@ -1,9 +1,9 @@
 """Strict resolved-config validation for controlled FLARE experiments."""
 
+from copy import deepcopy
 import json
 import math
 import os
-from copy import deepcopy
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -95,30 +95,76 @@ def validate_reference_config(config, flare_sidecars) -> None:
         sidecar_summary = json.load(handle)
     teacher_horizon = int(sidecar_summary["gr00t_interface"]["teacher_horizon"])
     gt_horizon = len(config.data.modality_configs["libero_sim"]["action"].delta_indices)
+    if teacher_horizon != 8 or gt_horizon != 16:
+        raise RuntimeError(
+            "Controlled FLARE experiments require teacher horizon 8 and GT horizon 16; "
+            f"got teacher={teacher_horizon}, GT={gt_horizon}"
+        )
 
     gt_ratio = float(candidate_by_type["physical_embodiment"]["mix_ratio"])
     teacher_ratio = float(candidate_by_type["flare_distillation"]["mix_ratio"])
-    gt_weight = gt_ratio / gt_horizon
-    teacher_weight = teacher_ratio / teacher_horizon
-    effective_teacher = teacher_weight / (gt_weight + teacher_weight)
     reference_teacher = float(reference_by_type["flare_distillation"]["mix_ratio"])
     reference_total = sum(float(item["mix_ratio"]) for item in reference_by_type.values())
     reference_teacher /= reference_total
-    if not math.isclose(effective_teacher, reference_teacher, rel_tol=0.0, abs_tol=1e-12):
-        raise RuntimeError(
-            "Supervised-step-corrected mixture differs from the v1 reference: "
-            f"effective_teacher={effective_teacher:.16f}, expected={reference_teacher:.16f}"
+
+    fixed_gt = config.data.fixed_gt_samples_per_batch
+    fixed_teacher = config.data.fixed_teacher_samples_per_batch
+    if fixed_gt is not None and fixed_teacher is not None:
+        fixed_total = fixed_gt + fixed_teacher
+        effective_teacher = fixed_teacher / fixed_total
+        nearest_integer_tolerance = 0.5 / fixed_total
+        if not math.isclose(
+            effective_teacher,
+            reference_teacher,
+            rel_tol=0.0,
+            abs_tol=nearest_integer_tolerance,
+        ):
+            raise RuntimeError(
+                "Fixed teacher count is not the nearest-integer implementation "
+                f"of the v1 ratio: effective_teacher={effective_teacher:.16f}, "
+                f"expected={reference_teacher:.16f}"
+            )
+        print(
+            "Fixed replay composition verified: "
+            f"GT/teacher={fixed_gt}/{fixed_teacher}, "
+            f"effective GT/teacher={1.0 - effective_teacher:.3%}/{effective_teacher:.3%}, "
+            f"horizons={gt_horizon}/{teacher_horizon}"
         )
-    print(
-        "Sampler compatibility compensation verified: "
-        f"raw GT/teacher={gt_ratio:.16f}/{teacher_ratio:.16f}, "
-        f"horizons={gt_horizon}/{teacher_horizon}, "
-        f"effective GT/teacher={1.0 - effective_teacher:.2%}/{effective_teacher:.2%}"
-    )
+    else:
+        gt_weight = gt_ratio / gt_horizon
+        teacher_weight = teacher_ratio / teacher_horizon
+        effective_teacher = teacher_weight / (gt_weight + teacher_weight)
+        if not math.isclose(effective_teacher, reference_teacher, rel_tol=0.0, abs_tol=1e-12):
+            raise RuntimeError(
+                "Supervised-step-corrected mixture differs from the v1 reference: "
+                f"effective_teacher={effective_teacher:.16f}, expected={reference_teacher:.16f}"
+            )
+        print(
+            "Sampler compatibility compensation verified: "
+            f"raw GT/teacher={gt_ratio:.16f}/{teacher_ratio:.16f}, "
+            f"horizons={gt_horizon}/{teacher_horizon}, "
+            f"effective GT/teacher={1.0 - effective_teacher:.2%}/{effective_teacher:.2%}"
+        )
 
     normalized = deepcopy(candidate)
+    normalized["data"].pop("fixed_gt_samples_per_batch", None)
+    normalized["data"].pop("fixed_teacher_samples_per_batch", None)
     normalized["training"]["output_dir"] = reference["training"]["output_dir"]
     normalized["training"]["experiment_name"] = reference["training"]["experiment_name"]
+    expected_save_only = os.environ.get("FLARE_EXPECTED_SAVE_ONLY_MODEL")
+    if expected_save_only is not None:
+        if expected_save_only not in {"0", "1"}:
+            raise ValueError("FLARE_EXPECTED_SAVE_ONLY_MODEL must be 0 or 1")
+        expected_value = expected_save_only == "1"
+        if candidate["training"]["save_only_model"] != expected_value:
+            raise RuntimeError(
+                "Resolved save_only_model does not match the persistence contract: "
+                f"actual={candidate['training']['save_only_model']}, "
+                f"expected={expected_value}"
+            )
+    normalized["training"]["save_only_model"] = reference["training"].get(
+        "save_only_model", False
+    )
     normalized["model"]["color_jitter_params"] = reference["model"]["color_jitter_params"]
     normalized["model"]["extra_augmentation_config"] = reference["model"].get(
         "extra_augmentation_config"
@@ -135,5 +181,6 @@ def validate_reference_config(config, flare_sidecars) -> None:
         )
     print(
         "Resolved-config reference comparison passed; only experiment identity, "
-        "planned image augmentation, and sampler compensation differ."
+        "planned image augmentation, sampler compensation, and checkpoint "
+        "persistence may differ."
     )

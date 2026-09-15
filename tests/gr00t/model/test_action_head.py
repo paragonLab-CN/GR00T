@@ -150,6 +150,48 @@ class TestActionHeadGetAction:
         )
         assert out["action_pred"].shape[0] == 1
 
+    def test_seeded_initial_noise_is_reproducible(self, action_head):
+        head, config = action_head
+        backbone_output = _make_backbone_output(config)
+        action_input = _make_action_input(config)
+        del action_input["action"]
+
+        features = head._encode_features(backbone_output, action_input)
+
+        def predict(seed):
+            return head.get_action_with_features(
+                backbone_features=features.backbone_features,
+                state_features=features.state_features,
+                embodiment_id=action_input.embodiment_id,
+                backbone_output=backbone_output,
+                action_input=action_input,
+                options={"initial_noise_seed": seed},
+            )["action_pred"]
+
+        first = predict(2026)
+        torch.randn(1000)  # The request-local seed must ignore global RNG consumption.
+        replay = predict(2026)
+        different = predict(2027)
+
+        torch.testing.assert_close(first, replay, rtol=0, atol=0)
+        assert not torch.equal(first, different)
+
+    def test_seed_and_explicit_noise_are_mutually_exclusive(self, action_head):
+        head, config = action_head
+        action_input = _make_action_input(config)
+        del action_input["action"]
+        initial_noise = torch.zeros(2, config.action_horizon, config.max_action_dim)
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            head.get_action(
+                _make_backbone_output(config),
+                action_input,
+                options={
+                    "initial_noise": initial_noise,
+                    "initial_noise_seed": 2026,
+                },
+            )
+
 
 class TestActionHeadEncodeFeatures:
     """Test feature encoding helper."""

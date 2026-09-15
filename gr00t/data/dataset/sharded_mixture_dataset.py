@@ -178,6 +178,8 @@ class ShardedMixtureDataset(IterableDataset):
         training: bool = True,
         num_shards_per_epoch: int = int(1e5),
         override_pretraining_statistics: bool = False,
+        configure_processor: bool = True,
+        prefetch_shards: bool = True,
     ):
         """Initialize mixture dataset with datasets, weights, and configuration."""
         self.datasets = datasets
@@ -188,12 +190,16 @@ class ShardedMixtureDataset(IterableDataset):
         self.epoch = 0
         self.processor = processor
         self.override_pretraining_statistics = override_pretraining_statistics
+        self.prefetch_shards = prefetch_shards
 
         # Generate initial shard sampling schedule
         self.shard_sampling_schedule = self.generate_shard_sampling_schedule()
 
         # Merge statistics across datasets and configure processor
-        self.merge_statistics()
+        if configure_processor:
+            self.merge_statistics()
+        else:
+            self.global_stats = {}
 
         # Initialize distributed training parameters
         if dist.is_initialized():
@@ -366,6 +372,10 @@ class ShardedMixtureDataset(IterableDataset):
         4. Shuffle timesteps within each shard for additional randomization
         5. Handle epoch transitions and schedule regeneration
         """
+        if not self.prefetch_shards:
+            yield from self._iter_without_prefetch()
+            return
+
         # Start background thread pool
         self._executor = ThreadPoolExecutor(max_workers=1)
 
@@ -400,6 +410,34 @@ class ShardedMixtureDataset(IterableDataset):
                 yield self.curr_shard[index]
 
             # Clean up cached shard to free memory
+            self.delete_cached_shard()
+
+    def _iter_without_prefetch(self):
+        """Iterate synchronously, primarily for bounded diagnostics.
+
+        This mode avoids leaving a background shard-loading future alive when a
+        caller intentionally stops after only a few batches.
+        """
+        self.worker_shard_sampling_schedule = self.filter_shard_sample_schedule()
+        self.curr_shard_index = -1
+        rng = np.random.default_rng(self.seed + self.epoch)
+
+        while True:
+            if self.curr_shard_index + 1 >= len(self.worker_shard_sampling_schedule):
+                self.epoch += 1
+                self.shard_sampling_schedule = self.generate_shard_sampling_schedule()
+                self.worker_shard_sampling_schedule = self.filter_shard_sample_schedule()
+                self.curr_shard_index = -1
+
+            self.curr_shard_index += 1
+            dataset_index, shard_index = self.worker_shard_sampling_schedule[
+                self.curr_shard_index
+            ]
+            self.curr_shard = self.datasets[dataset_index].get_shard(shard_index)
+            indices_in_shard = np.arange(len(self.curr_shard))
+            rng.shuffle(indices_in_shard)
+            for index in indices_in_shard:
+                yield self.curr_shard[index]
             self.delete_cached_shard()
 
     def cache_next_shard(self):
@@ -496,3 +534,93 @@ class ShardedMixtureDataset(IterableDataset):
             if hasattr(dataset, "get_initial_actions"):
                 initial_actions.extend(dataset.get_initial_actions())  # type: ignore
         return initial_actions
+
+
+FIXED_BATCH_SOURCE_KEY = "__gr00t_dataset_source__"
+
+
+class FixedRatioShardedMixtureDataset(ShardedMixtureDataset):
+    """Yield independently shuffled, strict-composition sample blocks.
+
+    PyTorch assigns each auto-collated IterableDataset batch to one worker. Each
+    worker starts at a block boundary, so every emitted micro-batch has the
+    requested GT/teacher counts even with multiple workers.
+    """
+
+    def __init__(
+        self,
+        datasets: list[ShardedDataset],
+        source_labels: list[str],
+        source_counts: list[int],
+        processor: BaseProcessor,
+        seed: int = 42,
+        training: bool = True,
+        num_shards_per_epoch: int = int(1e5),
+        override_pretraining_statistics: bool = False,
+        prefetch_shards: bool = True,
+    ):
+        if len(datasets) != 2 or len(source_labels) != 2 or len(source_counts) != 2:
+            raise ValueError("Fixed-ratio replay requires exactly two data sources")
+        if set(source_labels) != {"gt", "teacher"}:
+            raise ValueError(
+                f"Fixed-ratio source labels must be gt/teacher, got {source_labels}"
+            )
+        if any(count <= 0 for count in source_counts):
+            raise ValueError(f"Fixed source counts must be positive, got {source_counts}")
+
+        self.source_labels = list(source_labels)
+        self.source_counts = list(source_counts)
+        self.fixed_source_counts = dict(zip(source_labels, source_counts))
+        self.fixed_batch_size = sum(source_counts)
+        super().__init__(
+            datasets=datasets,
+            weights=[float(count) for count in source_counts],
+            processor=processor,
+            seed=seed,
+            training=training,
+            num_shards_per_epoch=num_shards_per_epoch,
+            override_pretraining_statistics=override_pretraining_statistics,
+            prefetch_shards=prefetch_shards,
+        )
+
+    def __iter__(self):
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        batch_rng = np.random.default_rng(
+            self.seed + self.rank * 1_000_003 + worker_id * 10_007
+        )
+
+        # Build independent infinite shard streams inside each worker. The
+        # processor/statistics were already configured once by the parent.
+        source_iterators = []
+        for source_index, dataset in enumerate(self.datasets):
+            source_stream = ShardedMixtureDataset(
+                datasets=[dataset],
+                weights=[1.0],
+                processor=self.processor,
+                seed=self.seed + (source_index + 1) * 1_000_033,
+                training=self.training,
+                num_shards_per_epoch=self.num_shards_per_epoch,
+                override_pretraining_statistics=self.override_pretraining_statistics,
+                configure_processor=False,
+                prefetch_shards=self.prefetch_shards,
+            )
+            source_iterators.append(iter(source_stream))
+
+        while True:
+            block = []
+            for source_label, source_count, source_iterator in zip(
+                self.source_labels, self.source_counts, source_iterators
+            ):
+                for _ in range(source_count):
+                    sample = dict(next(source_iterator))
+                    sample[FIXED_BATCH_SOURCE_KEY] = source_label
+                    block.append(sample)
+
+            if len(block) != self.fixed_batch_size:
+                raise RuntimeError(
+                    f"Fixed-ratio sampler built {len(block)} samples; "
+                    f"expected {self.fixed_batch_size}"
+                )
+            for index in batch_rng.permutation(self.fixed_batch_size):
+                yield block[int(index)]

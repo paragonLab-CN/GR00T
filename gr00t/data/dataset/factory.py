@@ -18,7 +18,10 @@ from tqdm import tqdm
 
 from gr00t.configs.base_config import Config
 from gr00t.data.dataset.flare_distillation_dataset import FlareDistillationDataset
-from gr00t.data.dataset.sharded_mixture_dataset import ShardedMixtureDataset
+from gr00t.data.dataset.sharded_mixture_dataset import (
+    FixedRatioShardedMixtureDataset,
+    ShardedMixtureDataset,
+)
 from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.interfaces import BaseProcessor
@@ -42,6 +45,7 @@ class DatasetFactory:
             "Sharded dataset does not support evaluation sets"
         )
 
+        all_source_labels = []
         all_datasets = []
         all_weights = []
         for dataset_spec in tqdm(
@@ -115,6 +119,31 @@ class DatasetFactory:
                 weight = dataset_spec.mix_ratio / dataset.supervised_steps
                 all_datasets.append(dataset)
                 all_weights.append(weight)
+                source_label = "teacher" if dataset_type == "flare_distillation" else "gt"
+                all_source_labels.append(source_label)
+
+        fixed_gt = self.config.data.fixed_gt_samples_per_batch
+        fixed_teacher = self.config.data.fixed_teacher_samples_per_batch
+        if fixed_gt is not None and fixed_teacher is not None:
+            source_counts = [
+                fixed_gt if source_label == "gt" else fixed_teacher
+                for source_label in all_source_labels
+            ]
+            return (
+                FixedRatioShardedMixtureDataset(
+                    datasets=all_datasets,
+                    source_labels=all_source_labels,
+                    source_counts=source_counts,
+                    processor=processor,
+                    seed=self.config.data.seed,
+                    training=True,
+                    num_shards_per_epoch=self.config.data.num_shards_per_epoch,
+                    override_pretraining_statistics=(
+                        self.config.data.override_pretraining_statistics
+                    ),
+                ),
+                None,
+            )
 
         return (
             ShardedMixtureDataset(

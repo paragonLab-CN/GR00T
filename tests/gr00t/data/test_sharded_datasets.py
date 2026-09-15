@@ -21,11 +21,19 @@ so we mock the episode loader to test sharding logic in isolation.
 ShardedMixtureDataset tests use lightweight mock ShardedDataset instances.
 """
 
+from collections import Counter
 from unittest.mock import MagicMock, patch
 
-from gr00t.data.dataset.sharded_mixture_dataset import ShardedMixtureDataset, merge_statistics
+from gr00t.data.dataset.sharded_mixture_dataset import (
+    FIXED_BATCH_SOURCE_KEY,
+    FixedRatioShardedMixtureDataset,
+    ShardedMixtureDataset,
+    merge_statistics,
+)
 from gr00t.data.interfaces import ShardedDataset
 import numpy as np
+import pytest
+from torch.utils.data import DataLoader
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +250,70 @@ class TestShardedMixtureDataset:
                 seed=42,
             )
         processor.set_statistics.assert_called_once()
+
+
+class TestFixedRatioShardedMixtureDataset:
+    """Strict replay composition must hold at every worker-local batch boundary."""
+
+    @staticmethod
+    def _make_fixed(seed=42):
+        datasets = [
+            MockShardedDataset("/fake/gt", num_shards=8, shard_length=128),
+            MockShardedDataset("/fake/teacher", num_shards=8, shard_length=128),
+        ]
+        processor = MagicMock()
+        processor.set_statistics = MagicMock()
+        with patch("torch.distributed.is_initialized", return_value=False):
+            return FixedRatioShardedMixtureDataset(
+                datasets=datasets,
+                source_labels=["gt", "teacher"],
+                source_counts=[54, 10],
+                processor=processor,
+                seed=seed,
+                num_shards_per_epoch=64,
+            )
+
+    @pytest.mark.parametrize("num_workers", [0, 2])
+    def test_100_batches_are_exact_54_to_10(self, num_workers):
+        dataset = self._make_fixed()
+        loader_kwargs = {
+            "batch_size": 64,
+            "num_workers": num_workers,
+        }
+        if num_workers:
+            loader_kwargs["multiprocessing_context"] = "fork"
+        loader = DataLoader(dataset, **loader_kwargs)
+
+        for batch_index, batch in enumerate(loader):
+            counts = Counter(batch[FIXED_BATCH_SOURCE_KEY])
+            assert counts == {"gt": 54, "teacher": 10}
+            assert len(batch["dummy"]) == 64
+            if batch_index == 99:
+                break
+
+    def test_seed_controls_order_without_changing_ratio(self):
+        def sample_order(seed):
+            iterator = iter(self._make_fixed(seed=seed))
+            return [
+                (sample[FIXED_BATCH_SOURCE_KEY], sample["dummy"])
+                for sample in (next(iterator) for _ in range(128))
+            ]
+
+        first = sample_order(42)
+        repeated = sample_order(42)
+        changed = sample_order(43)
+        assert first == repeated
+        assert first != changed
+        for offset in (0, 64):
+            assert Counter(source for source, _ in first[offset : offset + 64]) == {
+                "gt": 54,
+                "teacher": 10,
+            }
+            assert Counter(source for source, _ in changed[offset : offset + 64]) == {
+                "gt": 54,
+                "teacher": 10,
+            }
+
 
 
 # ---------------------------------------------------------------------------

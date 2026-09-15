@@ -28,6 +28,8 @@ DISTILLATION_INDEX_PATH=""
 TEACHER_RECORDS_PATH=""
 KEEP_FULL_GT_DATASET=0
 TEACHER_MIX_RATIO="0.2"
+FIXED_GT_SAMPLES_PER_BATCH=""
+FIXED_TEACHER_SAMPLES_PER_BATCH=""
 ALLOW_PADDING=0
 EXTRA_ARGS=()
 
@@ -45,6 +47,8 @@ Usage: bash examples/finetune.sh \
   [--teacher-records-path <path>] \
   [--keep-full-gt-dataset] \
   [--teacher-mix-ratio <value>] \
+  [--fixed-gt-samples-per-batch <count>] \
+  [--fixed-teacher-samples-per-batch <count>] \
   [--allow-padding] \
   [--save-only-model] \
   [-- <extra launch_finetune.py args>...]
@@ -103,6 +107,14 @@ while [ "$#" -gt 0 ]; do
             ;;
         --teacher-mix-ratio)
             TEACHER_MIX_RATIO="$2"
+            shift 2
+            ;;
+        --fixed-gt-samples-per-batch)
+            FIXED_GT_SAMPLES_PER_BATCH="$2"
+            shift 2
+            ;;
+        --fixed-teacher-samples-per-batch)
+            FIXED_TEACHER_SAMPLES_PER_BATCH="$2"
             shift 2
             ;;
         --allow-padding)
@@ -202,6 +214,12 @@ fi
 if [ "$KEEP_FULL_GT_DATASET" = "1" ]; then
     LAUNCH_CMD+=(--keep_full_gt_dataset)
     LAUNCH_CMD+=(--teacher_mix_ratio "$TEACHER_MIX_RATIO")
+fi
+if [ -n "$FIXED_GT_SAMPLES_PER_BATCH" ]; then
+    LAUNCH_CMD+=(--fixed_gt_samples_per_batch "$FIXED_GT_SAMPLES_PER_BATCH")
+fi
+if [ -n "$FIXED_TEACHER_SAMPLES_PER_BATCH" ]; then
+    LAUNCH_CMD+=(--fixed_teacher_samples_per_batch "$FIXED_TEACHER_SAMPLES_PER_BATCH")
 fi
 if [ "$ALLOW_PADDING" = "1" ]; then
     LAUNCH_CMD+=(--allow_padding)

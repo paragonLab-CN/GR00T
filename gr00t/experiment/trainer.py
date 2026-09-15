@@ -40,6 +40,8 @@ from transformers.trainer import TRAINER_STATE_NAME, Trainer, TrainerState, get_
 from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalPrediction
 
+from gr00t.data.dataset.sharded_mixture_dataset import FIXED_BATCH_SOURCE_KEY
+
 
 class ProfCallback(TrainerCallback):
     def __init__(self, prof):
@@ -189,6 +191,45 @@ def compute_eval_accuracy(
     else:
         return {}
 
+class FixedSourceCountCollator:
+    """Validate and remove the internal fixed-replay source marker."""
+
+    def __init__(self, collator, expected_counts: dict[str, int]):
+        self.collator = collator
+        self.expected_counts = dict(expected_counts)
+        self.validated_batches = 0
+
+    def __call__(self, features):
+        actual_counts = {source: 0 for source in self.expected_counts}
+        cleaned_features = []
+        for feature in features:
+            cleaned = dict(feature)
+            source = cleaned.pop(FIXED_BATCH_SOURCE_KEY, None)
+            if source not in actual_counts:
+                raise RuntimeError(
+                    f"Missing or invalid fixed-replay source marker: {source!r}"
+                )
+            actual_counts[source] += 1
+            cleaned_features.append(cleaned)
+
+        expected_total = sum(self.expected_counts.values())
+        if len(features) != expected_total or actual_counts != self.expected_counts:
+            raise RuntimeError(
+                "Fixed-replay batch composition mismatch: "
+                f"actual={actual_counts}, expected={self.expected_counts}, "
+                f"total={len(features)}/{expected_total}"
+            )
+
+        self.validated_batches += 1
+        if self.validated_batches == 1 or self.validated_batches % 1000 == 0:
+            logging.info(
+                "Fixed-replay batch validation passed: counts=%s, validated_batches=%d",
+                actual_counts,
+                self.validated_batches,
+            )
+        return self.collator(cleaned_features)
+
+
 
 class Gr00tTrainer(Trainer):
     """Trainer that bypasses torch dataloader and makes data collator async."""
@@ -239,6 +280,11 @@ class Gr00tTrainer(Trainer):
         data_collator = self._get_collator_with_removed_columns(
             data_collator, description="training"
         )
+        fixed_source_counts = getattr(self.train_dataset, "fixed_source_counts", None)
+        if fixed_source_counts is not None:
+            data_collator = FixedSourceCountCollator(
+                data_collator, expected_counts=fixed_source_counts
+            )
         # Use persistent workers for sharded dataset if num_workers is greater than 0
         persistent_workers = self.args.dataloader_num_workers > 0
 

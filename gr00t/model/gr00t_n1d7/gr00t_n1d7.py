@@ -328,9 +328,11 @@ class Gr00tN1d7ActionHead(nn.Module):
             state_features: [B, state_horizon, input_embedding_dim]
             embodiment_id: [B] (embodiment IDs)
             backbone_output: Output from the backbone model
-            options: Optional action-generation controls. When
-                ``initial_noise`` is supplied, it must have shape
-                ``[B, config.action_horizon, action_dim]``.
+            options: Optional action-generation controls. ``initial_noise``
+                supplies an exact tensor with shape
+                ``[B, config.action_horizon, action_dim]``. Alternatively,
+                ``initial_noise_seed`` deterministically creates that tensor
+                from a local CPU generator without mutating global RNG state.
         """
         vl_embeds = backbone_features
 
@@ -347,7 +349,30 @@ class Gr00tN1d7ActionHead(nn.Module):
         )
 
         initial_noise = None if options is None else options.get("initial_noise")
-        if initial_noise is None:
+        initial_noise_seed = None if options is None else options.get("initial_noise_seed")
+        if initial_noise is not None and initial_noise_seed is not None:
+            raise ValueError("initial_noise and initial_noise_seed are mutually exclusive")
+
+        if initial_noise_seed is not None:
+            try:
+                initial_noise_seed = int(initial_noise_seed)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"initial_noise_seed must be an integer, got {initial_noise_seed!r}"
+                ) from exc
+
+            # Generate on CPU so the exact normal sample is independent of the
+            # CUDA RNG state. A fresh local generator also makes this request
+            # reproducible without perturbing any process-global RNG stream.
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(initial_noise_seed)
+            actions = torch.randn(
+                size=expected_noise_shape,
+                generator=generator,
+                dtype=torch.float32,
+                device="cpu",
+            ).to(device=device, dtype=vl_embeds.dtype)
+        elif initial_noise is None:
             actions = torch.randn(
                 size=expected_noise_shape,
                 dtype=vl_embeds.dtype,
