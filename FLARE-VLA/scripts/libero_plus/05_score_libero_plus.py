@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Batch LeWM scoring and statistical reporting for the FLARE-VLA validation set.
+"""Score the full sparse LIBERO-Plus GR00T candidate set with LeWM.
 
 Run this script in the ``LeWorldModel`` environment. It loads LeWM once, reads
 manifest-selected GR00T candidate files, predicts K candidate future latent
 trajectories plus one demonstrated-action oracle trajectory, writes resumable
-per-sample score parts, and aggregates the final 500-sample report.
+per-sample score parts, and aggregates full-dataset reports.
 
-Action conventions are handled explicitly:
-  * candidate files: LeRobot gripper, 1=open and 0=close
-  * LeWM frame bank: raw LIBERO/LeWM gripper, -1=open and +1=close
+The LIBERO-Plus source dataset was converted before LeWM training, so both
+candidate files and the GT latent frame bank use the LeRobot gripper convention:
+1=open and 0=close.
 """
 
 from __future__ import annotations
@@ -39,12 +39,47 @@ import torch.nn.functional as F
 from hydra import compose, initialize_config_dir
 from omegaconf import open_dict
 
-PROJECT_ROOT = Path("/root/autodl-tmp/le-wm")
+SCRIPT_PATH = Path(__file__).resolve()
+FLARE_ROOT = SCRIPT_PATH.parents[2]
+ISAAC_ROOT = FLARE_ROOT.parent
+WORKSPACE_ROOT = ISAAC_ROOT.parent
+PROJECT_ROOT = Path(
+    os.environ.get("LEWM_ROOT", WORKSPACE_ROOT / "le-wm")
+).expanduser().resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-EXPECTED_CKPT_SHA256 = (
+DEFAULT_EXPECTED_CKPT_SHA256 = (
     "ceb52c6b525ca34b5bbdc395e20f6e2b0663bb9d86995e9c00a7ae443ba1d3da"
 )
+FULL_MANIFEST_FORMAT = "libero_plus_sparse_manifest_v1"
+CANDIDATE_FORMAT = "flare_groot_manifest_candidates_v1"
+CANDIDATE_SUMMARY_FORMAT = "flare_candidate_generation_summary_v1"
+SCORE_PART_FORMAT = "flare_lewm_libero_plus_score_part_v2"
+EXPECTED_DATASET_NAME = "libero_plus_lerobot__observation_images_front"
+EXPECTED_H5_FORMATS = {
+    "lewm_gt_latent_framebank_spatial_v1",
+    "lewm_gt_latent_framebank_libero_plus_v2",
+}
+SUITES = {
+    "libero_spatial",
+    "libero_object",
+    "libero_goal",
+    "libero_10",
+}
+
+DEFAULT_MANIFEST = (
+    FLARE_ROOT / "outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl"
+)
+DEFAULT_CANDIDATE_ROOT = ISAAC_ROOT / "outputs/libero_plus/sparse_candidates"
+DEFAULT_GT_H5 = (
+    FLARE_ROOT
+    / "outputs/libero_plus/gt_latents/libero_plus_epoch9_h8_framebank_trainpipe.h5"
+)
+DEFAULT_CHECKPOINT = (
+    PROJECT_ROOT
+    / "stablewm_data/checkpoints/libero_plus_lewm_full/weights_epoch_9.pt"
+)
+DEFAULT_OUTPUT_DIR = FLARE_ROOT / "outputs/libero_plus/teacher_scoring"
 
 # stable_pretraining registers the OmegaConf ``eval`` resolver at import time.
 # Do not register a second resolver in this script.
@@ -146,6 +181,159 @@ def ensure_finite(name: str, tensor: torch.Tensor) -> None:
         raise RuntimeError(f"{name} contains {bad} NaN/Inf values")
 
 
+def is_sha256(value: Any) -> bool:
+    text = str(value)
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
+
+
+def validate_manifest(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        raise RuntimeError("Manifest is empty")
+
+    seen_sample_ids: set[str] = set()
+    for expected_index, row in enumerate(rows):
+        sample_id = row.get("sample_id")
+        if not isinstance(sample_id, str) or not sample_id:
+            raise RuntimeError(f"Manifest row {expected_index} has invalid sample_id")
+        if sample_id in seen_sample_ids:
+            raise RuntimeError(f"Manifest contains duplicate sample_id {sample_id}")
+        seen_sample_ids.add(sample_id)
+
+        if row.get("sample_index") != expected_index:
+            raise RuntimeError(
+                f"Manifest row {expected_index} has sample_index="
+                f"{row.get('sample_index')!r}"
+            )
+        suite = row.get("suite")
+        if suite not in SUITES:
+            raise RuntimeError(
+                f"Manifest sample {sample_id} has invalid suite={suite!r}"
+            )
+        if row.get("gt_latent_key") != suite:
+            raise RuntimeError(
+                f"Manifest sample {sample_id} has gt_latent_key="
+                f"{row.get('gt_latent_key')!r}, expected {suite!r}"
+            )
+        if int(row.get("lewm_episode_index", -1)) != int(
+            row.get("episode_index", -2)
+        ):
+            raise RuntimeError(
+                f"Manifest sample {sample_id} is not in LeRobot episode order"
+            )
+
+        global_index = int(row["global_index"])
+        history_rows = [int(value) for value in row.get("history_rows", [])]
+        future_rows = [int(value) for value in row.get("future_rows", [])]
+        if history_rows != [global_index - 2, global_index - 1, global_index]:
+            raise RuntimeError(
+                f"Manifest sample {sample_id} has invalid history_rows"
+            )
+        if future_rows != list(range(global_index + 1, global_index + 9)):
+            raise RuntimeError(
+                f"Manifest sample {sample_id} has invalid future_rows"
+            )
+        if (
+            int(row.get("history_size", -1)) != 3
+            or int(row.get("window_horizon", row.get("horizon", -1))) != 8
+            or int(row.get("candidate_k", -1)) != 4
+        ):
+            raise RuntimeError(
+                f"Manifest sample {sample_id} does not satisfy history=3,H=8,K=4"
+            )
+
+
+def validate_h5_contract(
+    h5: h5py.File,
+    checkpoint_path: Path,
+    checkpoint: dict[str, Any],
+    checkpoint_sha256: str,
+    horizon: int,
+) -> np.ndarray:
+    attrs = h5.attrs
+    if not bool(attrs.get("complete", False)):
+        raise RuntimeError("GT latent H5 is not marked complete")
+    if not bool(attrs.get("frame_action_ready", False)):
+        raise RuntimeError("GT latent H5 frame_action is not marked ready")
+    if not bool(attrs.get("window_metadata_ready", False)):
+        raise RuntimeError("GT latent H5 window metadata is not marked ready")
+    if attrs.get("format") not in EXPECTED_H5_FORMATS:
+        raise RuntimeError(f"Unexpected GT latent H5 format: {attrs.get('format')!r}")
+    if attrs.get("dataset_name") != EXPECTED_DATASET_NAME:
+        raise RuntimeError(
+            f"GT latent H5 dataset_name={attrs.get('dataset_name')!r}, "
+            f"expected {EXPECTED_DATASET_NAME!r}"
+        )
+
+    expected_scalars = {
+        "frameskip": 1,
+        "future_horizon": horizon,
+        "action_dim": 7,
+        "latent_dim": 192,
+    }
+    for key, expected in expected_scalars.items():
+        if int(attrs.get(key, -1)) != expected:
+            raise RuntimeError(
+                f"GT latent H5 {key}={attrs.get(key)!r}, expected {expected}"
+            )
+
+    required_datasets = {
+        "frame_latent",
+        "frame_action",
+        "episode_id",
+        "ep_offset",
+        "ep_len",
+        "window_current_row",
+        "window_episode_id",
+        "window_step_idx",
+        "window_future_row",
+    }
+    missing = required_datasets - set(h5.keys())
+    if missing:
+        raise RuntimeError(f"GT latent H5 is missing datasets: {sorted(missing)}")
+
+    total_frames = int(attrs.get("total_frames", -1))
+    total_windows = int(attrs.get("total_windows", -1))
+    if int(attrs.get("frames_written", -1)) != total_frames:
+        raise RuntimeError("GT latent H5 frames_written/total_frames mismatch")
+    if h5["frame_latent"].shape != (total_frames, 192):
+        raise RuntimeError(f"Unexpected frame_latent shape: {h5['frame_latent'].shape}")
+    if h5["frame_action"].shape != (total_frames, 7):
+        raise RuntimeError(f"Unexpected frame_action shape: {h5['frame_action'].shape}")
+    if h5["window_future_row"].shape != (total_windows, horizon):
+        raise RuntimeError(
+            f"Unexpected window_future_row shape: {h5['window_future_row'].shape}"
+        )
+
+    episode_ids = np.asarray(h5["episode_id"][:], dtype=np.int64)
+    ep_offsets = np.asarray(h5["ep_offset"][:], dtype=np.int64)
+    ep_lengths = np.asarray(h5["ep_len"][:], dtype=np.int64)
+    if not (
+        len(episode_ids) == len(ep_offsets) == len(ep_lengths)
+        and np.array_equal(episode_ids, np.arange(len(episode_ids), dtype=np.int64))
+    ):
+        raise RuntimeError("GT latent H5 is not in contiguous LeRobot episode order")
+    expected_offsets = np.concatenate(
+        [np.zeros(1, dtype=np.int64), np.cumsum(ep_lengths[:-1], dtype=np.int64)]
+    )
+    if not np.array_equal(ep_offsets, expected_offsets):
+        raise RuntimeError("GT latent H5 episode offsets are inconsistent")
+    if int(ep_lengths.sum()) != total_frames:
+        raise RuntimeError("GT latent H5 episode lengths do not sum to total_frames")
+
+    h5_checkpoint_path = Path(str(attrs.get("checkpoint_path", ""))).expanduser()
+    if h5_checkpoint_path.resolve() != checkpoint_path.resolve():
+        raise RuntimeError(
+            "GT latent H5 was generated with a different checkpoint path: "
+            f"{h5_checkpoint_path}"
+        )
+    if int(attrs.get("checkpoint_epoch", -1)) != int(checkpoint.get("epoch", -2)):
+        raise RuntimeError("GT latent H5/checkpoint epoch mismatch")
+    recorded_sha = attrs.get("checkpoint_sha256")
+    if recorded_sha is not None and str(recorded_sha) != checkpoint_sha256:
+        raise RuntimeError("GT latent H5/checkpoint SHA-256 mismatch")
+    return ep_offsets
+
+
 # -----------------------------------------------------------------------------
 # LeWM model/action helpers
 # -----------------------------------------------------------------------------
@@ -175,9 +363,18 @@ def build_model(cfg, checkpoint_path: Path, device: torch.device):
 def action_stats(frame_action_ds: h5py.Dataset) -> tuple[torch.Tensor, torch.Tensor]:
     """Reproduce utils.get_column_normalizer (PyTorch sample standard deviation)."""
     values = torch.from_numpy(np.asarray(frame_action_ds[:], dtype=np.float32))
-    values = values[~torch.isnan(values).any(dim=1)]
+    values = values[torch.isfinite(values).all(dim=1)]
+    if values.numel() == 0:
+        raise RuntimeError("No finite actions in GT latent H5")
+    gripper = values[:, 6]
+    if torch.any(gripper < -1e-5) or torch.any(gripper > 1.0 + 1e-5):
+        raise RuntimeError(
+            "GT latent H5 does not use the expected LeRobot gripper convention"
+        )
     mean = values.mean(dim=0, keepdim=True)
     std = values.std(dim=0, keepdim=True)
+    if not torch.isfinite(mean).all() or not torch.isfinite(std).all():
+        raise RuntimeError("Non-finite action normalization statistics")
     if torch.any(std <= 0):
         raise RuntimeError(f"Non-positive action std: {std}")
     return mean, std
@@ -283,23 +480,44 @@ def rollout_batch_from_latents(
 def validate_candidate_summary(
     summary_path: Path,
     manifest_path: Path,
+    candidate_dir: Path,
     manifest_sha256: str,
     expected_total: int,
 ) -> dict[str, Any]:
     summary = load_json(summary_path)
+    if summary.get("format") != CANDIDATE_SUMMARY_FORMAT:
+        raise RuntimeError(
+            f"Unexpected candidate summary format: {summary.get('format')!r}"
+        )
     if summary.get("status") != "PASS":
         raise RuntimeError(f"Candidate generation did not PASS: {summary}")
+    if summary.get("manifest_format") != FULL_MANIFEST_FORMAT:
+        raise RuntimeError(
+            f"Candidate summary manifest_format={summary.get('manifest_format')!r}, "
+            f"expected {FULL_MANIFEST_FORMAT!r}"
+        )
     if summary.get("manifest_sha256") != manifest_sha256:
         raise RuntimeError("Candidate summary manifest SHA-256 mismatch")
-    counters = summary.get("counters", {})
-    completed = int(counters.get("generated", 0)) + int(counters.get("skipped_valid", 0))
-    if int(counters.get("failed", 0)) != 0 or completed != expected_total:
-        raise RuntimeError(
-            f"Candidate generation incomplete: completed={completed}, "
-            f"expected={expected_total}, failed={counters.get('failed')}"
-        )
-    if Path(summary.get("manifest", "")).name != manifest_path.name:
+    if Path(str(summary.get("manifest", ""))).resolve() != manifest_path.resolve():
         raise RuntimeError("Candidate summary points to a different manifest")
+    if Path(str(summary.get("output_dir", ""))).resolve() != candidate_dir.resolve():
+        raise RuntimeError("Candidate summary points to a different candidate directory")
+
+    counters = summary.get("counters", {})
+    selected = int(counters.get("selected", -1))
+    completed = int(counters.get("generated", 0)) + int(
+        counters.get("skipped_valid", 0)
+    )
+    if (
+        selected != expected_total
+        or int(counters.get("failed", -1)) != 0
+        or completed != expected_total
+    ):
+        raise RuntimeError(
+            f"Candidate generation incomplete: selected={selected}, "
+            f"completed={completed}, expected={expected_total}, "
+            f"failed={counters.get('failed')}"
+        )
     return summary
 
 
@@ -316,6 +534,7 @@ def valid_score_part(
     row: dict[str, Any],
     manifest_sha256: str,
     checkpoint_sha256: str,
+    gt_h5_sha256: str,
     candidate_sha256: str,
     candidate_k: int,
     horizon: int,
@@ -324,15 +543,21 @@ def valid_score_part(
         return False
     try:
         part = load_torch(path)
-        if part.get("format") != "flare_lewm_validation_score_part_v1":
+        if part.get("format") != SCORE_PART_FORMAT:
             return False
         if part.get("sample_id") != row["sample_id"]:
             return False
         if int(part.get("sample_index", -1)) != int(row["sample_index"]):
             return False
+        if part.get("suite") != row["suite"]:
+            return False
+        if part.get("gt_latent_key") != row["gt_latent_key"]:
+            return False
         if part.get("manifest_sha256") != manifest_sha256:
             return False
         if part.get("checkpoint_sha256") != checkpoint_sha256:
+            return False
+        if part.get("gt_h5_sha256") != gt_h5_sha256:
             return False
         if part.get("candidate_sha256") != candidate_sha256:
             return False
@@ -360,17 +585,34 @@ def valid_score_part(
 def prepare_sample(
     row: dict[str, Any],
     candidate_file: Path,
+    candidate_sha256: str,
     h5: h5py.File,
+    ep_offsets: np.ndarray,
     candidate_k: int,
     history_size: int,
     horizon: int,
     manifest_sha256: str,
 ) -> dict[str, Any]:
     candidate = load_torch(candidate_file)
-    if candidate.get("format") != "flare_groot_manifest_candidates_v1":
+    if candidate.get("format") != CANDIDATE_FORMAT:
         raise RuntimeError(f"Unexpected candidate format: {candidate.get('format')}")
+    if candidate.get("manifest_format") != FULL_MANIFEST_FORMAT:
+        raise RuntimeError(
+            f"Candidate manifest_format={candidate.get('manifest_format')!r}"
+        )
     if candidate.get("manifest_sha256") != manifest_sha256:
         raise RuntimeError("Candidate manifest SHA-256 mismatch")
+    for key in ("suite", "gt_latent_key"):
+        if candidate.get(key) != row.get(key):
+            raise RuntimeError(
+                f"Candidate/manifest mismatch for {key}: "
+                f"candidate={candidate.get(key)!r}, manifest={row.get(key)!r}"
+            )
+    if Path(str(candidate.get("model_path", ""))).name != row["suite"]:
+        raise RuntimeError("Candidate was generated by the wrong suite checkpoint")
+    for key in ("per_suite_manifest_sha256", "source_candidate_sha256"):
+        if not is_sha256(candidate.get(key)):
+            raise RuntimeError(f"Candidate has invalid {key}")
 
     scalar_fields = (
         "sample_id",
@@ -402,7 +644,8 @@ def prepare_sample(
         raise RuntimeError(f"Candidate action shape mismatch: {actions_lerobot.shape}")
     actions_lerobot = actions_lerobot[0]
     ensure_finite("candidate_actions_lerobot", actions_lerobot)
-    actions_lewm = actions_lerobot  # Spatial: candidates already in LeWM-compatible space
+    # LIBERO-Plus was converted to the LeRobot 0/1 gripper convention before LeWM training.
+    actions_lewm = actions_lerobot
 
     episode_index = int(row["episode_index"])
     global_row = int(row["global_index"])
@@ -416,9 +659,9 @@ def prepare_sample(
         raise RuntimeError("window_episode_id mismatch")
     if int(h5["window_step_idx"][window_index]) != int(row["local_step"]):
         raise RuntimeError("window_step_idx mismatch")
-    if int(np.searchsorted(h5["ep_offset"][:], global_row, side="right") - 1) != episode_index:
+    if int(np.searchsorted(ep_offsets, global_row, side="right") - 1) != episode_index:
         raise RuntimeError("episode_id mismatch")
-    if not np.all(np.searchsorted(h5["ep_offset"][:], history_rows, side="right") - 1 == episode_index):
+    if not np.all(np.searchsorted(ep_offsets, history_rows, side="right") - 1 == episode_index):
         raise RuntimeError("History rows cross episode boundary")
 
     future_rows = np.asarray(h5["window_future_row"][window_index], dtype=np.int64)
@@ -441,7 +684,7 @@ def prepare_sample(
         np.asarray(h5["frame_action"][global_row : global_row + horizon], dtype=np.float32)
     )
     saved_gt_lerobot = torch.as_tensor(candidate["gt_actions_concat"]).float()
-    converted_gt_lerobot = h5_gt_actions  # Spatial: H5 already stores LeRobot-format actions
+    converted_gt_lerobot = h5_gt_actions
     if not torch.equal(converted_gt_lerobot, saved_gt_lerobot):
         diff = float((converted_gt_lerobot - saved_gt_lerobot).abs().max())
         raise RuntimeError(f"Candidate/H5 GT action mismatch after conversion: {diff}")
@@ -465,7 +708,7 @@ def prepare_sample(
     return {
         "row": row,
         "candidate_path": candidate_file,
-        "candidate_sha256": sha256_file(candidate_file),
+        "candidate_sha256": candidate_sha256,
         "candidate_actions_lerobot": actions_lerobot,
         "gt_actions_lerobot": saved_gt_lerobot,
         "history_latents": history_latents,
@@ -497,6 +740,7 @@ def make_score_part(
     oracle_predicted: torch.Tensor,  # [H,192]
     checkpoint_sha256: str,
     manifest_sha256: str,
+    gt_h5_sha256: str,
     scoring_seconds: float,
     save_predicted_latents: bool,
 ) -> dict[str, Any]:
@@ -531,9 +775,11 @@ def make_score_part(
     mse_margin = second_smallest(mse_score) - best_mse
 
     part: dict[str, Any] = {
-        "format": "flare_lewm_validation_score_part_v1",
+        "format": SCORE_PART_FORMAT,
         "sample_id": row["sample_id"],
         "sample_index": int(row["sample_index"]),
+        "suite": row["suite"],
+        "gt_latent_key": row["gt_latent_key"],
         "episode_index": int(row["episode_index"]),
         "local_step": int(row["local_step"]),
         "global_index": int(row["global_index"]),
@@ -542,6 +788,7 @@ def make_score_part(
         "task_text": row["task_text"],
         "manifest_sha256": manifest_sha256,
         "checkpoint_sha256": checkpoint_sha256,
+        "gt_h5_sha256": gt_h5_sha256,
         "candidate_path": str(prepared["candidate_path"]),
         "candidate_sha256": prepared["candidate_sha256"],
         "candidate_k": candidate_k,
@@ -586,7 +833,8 @@ def numeric_summary(values: np.ndarray) -> dict[str, float]:
     values = np.asarray(values, dtype=np.float64)
     values = values[np.isfinite(values)]
     if values.size == 0:
-        return {key: math.nan for key in ("mean", "std", "min", "p05", "p25", "median", "p75", "p95", "max")}
+        keys = ("mean", "std", "min", "p05", "p25", "median", "p75", "p95", "max")
+        return {key: math.nan for key in keys}
     return {
         "mean": float(values.mean()),
         "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
@@ -610,23 +858,28 @@ def write_parquet_best_effort(df: pd.DataFrame, path: Path) -> dict[str, Any]:
 
 def aggregate_results(
     selected_rows: list[dict[str, Any]],
+    completed_mask: np.ndarray,
     parts_dir: Path,
     output_dir: Path,
     manifest_sha256: str,
     checkpoint_sha256: str,
+    gt_h5_sha256: str,
     candidate_k: int,
     horizon: int,
 ) -> dict[str, Any]:
-    parts: list[dict[str, Any]] = []
+    if completed_mask.shape != (len(selected_rows),):
+        raise RuntimeError("Internal completed-mask shape mismatch")
+
+    part_paths: list[Path] = []
     missing: list[str] = []
-    for row in selected_rows:
+    for row, is_complete in zip(selected_rows, completed_mask, strict=True):
         path = score_part_path(parts_dir, row)
-        if not path.is_file():
+        if not bool(is_complete) or not path.is_file():
             missing.append(row["sample_id"])
             continue
-        parts.append(load_torch(path))
+        part_paths.append(path)
 
-    if not parts:
+    if not part_paths:
         raise RuntimeError("No valid score parts were available for aggregation")
 
     records: list[dict[str, Any]] = []
@@ -638,12 +891,17 @@ def aggregate_results(
     teacher_actions_mse = []
     gt_actions = []
 
-    for part in parts:
+    # Load one score part at a time. Keeping every torch payload alive at once
+    # is prohibitively expensive for the 487,880-window LIBERO-Plus manifest.
+    for path in part_paths:
+        part = load_torch(path)
         cosine = torch.as_tensor(part["cosine_score"]).float()
         mse = torch.as_tensor(part["mse_score"]).float()
         record: dict[str, Any] = {
             "sample_id": part["sample_id"],
             "sample_index": int(part["sample_index"]),
+            "suite": part["suite"],
+            "gt_latent_key": part["gt_latent_key"],
             "episode_index": int(part["episode_index"]),
             "local_step": int(part["local_step"]),
             "global_index": int(part["global_index"]),
@@ -703,12 +961,7 @@ def aggregate_results(
     df.to_csv(csv_path, index=False)
     parquet_status = write_parquet_best_effort(df, parquet_path)
 
-    bool_columns = (
-        "teacher_agreement",
-        "oracle_better_than_all_cosine",
-        "oracle_better_than_all_mse",
-    )
-    task_agg = df.groupby(["task_index", "task_text"], as_index=False).agg(
+    task_agg = df.groupby(["suite", "task_index", "task_text"], as_index=False).agg(
         samples=("sample_id", "count"),
         episodes=("episode_index", "nunique"),
         teacher_agreement_rate=("teacher_agreement", "mean"),
@@ -725,6 +978,23 @@ def aggregate_results(
     task_parquet = output_dir / "validation_task_summary.parquet"
     task_agg.to_csv(task_csv, index=False)
     task_parquet_status = write_parquet_best_effort(task_agg, task_parquet)
+
+    suite_agg = df.groupby("suite", as_index=False).agg(
+        samples=("sample_id", "count"),
+        tasks=("task_index", "nunique"),
+        episodes=("episode_index", "nunique"),
+        teacher_agreement_rate=("teacher_agreement", "mean"),
+        oracle_better_cosine_rate=("oracle_better_than_all_cosine", "mean"),
+        oracle_better_mse_rate=("oracle_better_than_all_mse", "mean"),
+        mean_best_cosine=("best_cosine_score", "mean"),
+        mean_best_mse=("best_mse_score", "mean"),
+        mean_oracle_cosine=("oracle_cosine_score", "mean"),
+        mean_oracle_mse=("oracle_mse_score", "mean"),
+    )
+    suite_csv = output_dir / "validation_suite_summary.csv"
+    suite_parquet = output_dir / "validation_suite_summary.parquet"
+    suite_agg.to_csv(suite_csv, index=False)
+    suite_parquet_status = write_parquet_best_effort(suite_agg, suite_parquet)
 
     cosine_step = np.stack(cosine_per_step).astype(np.float32)
     mse_step = np.stack(mse_per_step).astype(np.float32)
@@ -754,8 +1024,11 @@ def aggregate_results(
         "format": "flare_validation_teacher_records_v1",
         "manifest_sha256": manifest_sha256,
         "checkpoint_sha256": checkpoint_sha256,
+        "gt_h5_sha256": gt_h5_sha256,
         "sample_ids": df["sample_id"].tolist(),
         "sample_indices": torch.from_numpy(df["sample_index"].to_numpy(dtype=np.int64)),
+        "suites": df["suite"].tolist(),
+        "task_indices": torch.from_numpy(df["task_index"].to_numpy(dtype=np.int64)),
         "teacher_by_cosine": torch.from_numpy(teacher_cos_idx),
         "teacher_by_mse": torch.from_numpy(teacher_mse_idx),
         "teacher_actions_cosine_lerobot": torch.from_numpy(
@@ -788,11 +1061,12 @@ def aggregate_results(
 
     summary = {
         "format": "flare_validation_summary_v1",
-        "status": "PASS" if not missing and len(parts) == len(selected_rows) else "PARTIAL",
+        "status": "PASS" if not missing and len(part_paths) == len(selected_rows) else "PARTIAL",
         "manifest_sha256": manifest_sha256,
         "checkpoint_sha256": checkpoint_sha256,
+        "gt_h5_sha256": gt_h5_sha256,
         "requested_samples": len(selected_rows),
-        "scored_samples": len(parts),
+        "scored_samples": len(part_paths),
         "missing_samples": missing,
         "tasks": int(df["task_index"].nunique()),
         "episodes": int(df["episode_index"].nunique()),
@@ -862,6 +1136,8 @@ def aggregate_results(
             "scores_parquet": parquet_status,
             "task_summary_csv": str(task_csv),
             "task_summary_parquet": task_parquet_status,
+            "suite_summary_csv": str(suite_csv),
+            "suite_summary_parquet": suite_parquet_status,
             "stepwise_metrics": str(stepwise_path),
             "teacher_records": str(teacher_records_path),
         },
@@ -877,54 +1153,28 @@ def aggregate_results(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=Path(
-            "/root/autodl-tmp/Isaac-GR00T/outputs/flare_validation_500/"
-            "validation_manifest.jsonl"
-        ),
-    )
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
         "--candidate-dir",
         type=Path,
-        default=Path(
-            "/root/autodl-tmp/Isaac-GR00T/outputs/flare_validation_500/candidates"
-        ),
+        default=DEFAULT_CANDIDATE_ROOT / "candidates",
     )
     parser.add_argument(
         "--candidate-summary",
         type=Path,
-        default=Path(
-            "/root/autodl-tmp/Isaac-GR00T/outputs/flare_validation_500/"
-            "candidate_generation_summary.json"
-        ),
+        default=DEFAULT_CANDIDATE_ROOT / "candidate_generation_summary.json",
     )
-    parser.add_argument(
-        "--gt-h5",
-        type=Path,
-        default=Path(
-            "/root/autodl-tmp/le-wm/outputs/gt_latents/"
-            "libero90_epoch50_h8_framebank_trainpipe_lerobot_order.h5"
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=Path(
-            "/root/autodl-tmp/le-wm/stablewm_data/checkpoints/lewm/weights_epoch_50.pt"
-        ),
-    )
+    parser.add_argument("--gt-h5", type=Path, default=DEFAULT_GT_H5)
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument(
         "--expected-checkpoint-sha256",
-        default=EXPECTED_CKPT_SHA256,
-        help="Expected SHA-256 of the checkpoint file (overrides the built-in constant).",
+        default=DEFAULT_EXPECTED_CKPT_SHA256,
+        help=(
+            "Expected SHA-256 for the checkpoint used to build the GT frame bank. "
+            "Override this together with --checkpoint and --gt-h5."
+        ),
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("/root/autodl-tmp/le-wm/outputs/flare_validation_500"),
-    )
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -934,6 +1184,10 @@ def main() -> None:
 
     if args.batch_size < 1:
         raise ValueError("--batch-size must be >= 1")
+    if args.max_samples is not None and args.max_samples < 1:
+        raise ValueError("--max-samples must be >= 1")
+    if not is_sha256(args.expected_checkpoint_sha256):
+        raise ValueError("--expected-checkpoint-sha256 must be 64 lowercase hex characters")
 
     # Reproducible inference settings. The script contains no intentional RNG,
     # but these settings reduce backend-dependent variation across reruns.
@@ -941,51 +1195,41 @@ def main() -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    for path in (
-        args.manifest,
-        args.candidate_dir,
-        args.candidate_summary,
-        args.gt_h5,
-        args.checkpoint,
-    ):
+
+    for name in ("manifest", "candidate_dir", "candidate_summary", "gt_h5", "checkpoint"):
+        path = getattr(args, name).expanduser().resolve()
+        setattr(args, name, path)
         if not path.exists():
             raise FileNotFoundError(path)
+    args.output_dir = args.output_dir.expanduser().resolve()
 
     all_rows = load_jsonl(args.manifest)
-    if args.max_samples is not None:
-        if args.max_samples < 1:
-            raise ValueError("--max-samples must be >= 1")
-        selected_rows = all_rows[: args.max_samples]
-    else:
-        selected_rows = all_rows
+    validate_manifest(all_rows)
+    selected_rows = (
+        all_rows[: args.max_samples] if args.max_samples is not None else all_rows
+    )
+    if not selected_rows:
+        raise RuntimeError("No manifest samples selected")
 
     manifest_sha256 = sha256_file(args.manifest)
     checkpoint_sha256 = sha256_file(args.checkpoint)
+    gt_h5_sha256 = sha256_file(args.gt_h5)
     if checkpoint_sha256 != args.expected_checkpoint_sha256:
         raise RuntimeError(
-            f"Checkpoint SHA-256 mismatch: {checkpoint_sha256} != {args.expected_checkpoint_sha256}"
+            f"Checkpoint SHA-256 mismatch: {checkpoint_sha256} != "
+            f"{args.expected_checkpoint_sha256}"
         )
     generation_summary = validate_candidate_summary(
         args.candidate_summary,
         args.manifest,
+        args.candidate_dir,
         manifest_sha256,
         len(all_rows),
     )
 
-    history_size = int(selected_rows[0].get("history_size", len(selected_rows[0].get("history_rows", [1,2,3]))))
-    horizon = int(selected_rows[0].get("window_horizon", selected_rows[0].get("horizon", 8)))
-    candidate_k = int(selected_rows[0]["candidate_k"])
-    if (history_size, horizon, candidate_k) != (3, 8, 4):
-        raise RuntimeError(
-            f"Expected history=3,H=8,K=4, got {(history_size, horizon, candidate_k)}"
-        )
-    for row in selected_rows:
-        if (
-            int(row.get("history_size", len(row.get("history_rows", [1,2,3])))) != history_size
-            or int(row.get("window_horizon", row.get("horizon", 8))) != horizon
-            or int(row["candidate_k"]) != candidate_k
-        ):
-            raise RuntimeError("Manifest has mixed history/H/K values")
+    history_size = 3
+    horizon = 8
+    candidate_k = 4
 
     output_dir = args.output_dir.resolve()
     parts_dir = output_dir / "score_parts"
@@ -994,37 +1238,36 @@ def main() -> None:
     failures_path = output_dir / "scoring_failures.jsonl"
     summary_path = output_dir / "scoring_run_summary.json"
 
-    pending: list[dict[str, Any]] = []
+    pending: list[tuple[int, dict[str, Any], str]] = []
+    completed_mask = np.zeros(len(selected_rows), dtype=bool)
     skipped = 0
     regenerated = 0
-    candidate_hashes: dict[str, str] = {}
-    for row in selected_rows:
+    for selected_position, row in enumerate(selected_rows):
         cpath = candidate_path(args.candidate_dir, row)
         if not cpath.is_file():
             raise FileNotFoundError(cpath)
         csha = sha256_file(cpath)
-        candidate_hashes[row["sample_id"]] = csha
         part_path = score_part_path(parts_dir, row)
         if args.overwrite:
-            if part_path.exists():
-                part_path.unlink()
-            pending.append(row)
+            pending.append((selected_position, row, csha))
         elif valid_score_part(
             part_path,
             row,
             manifest_sha256,
             checkpoint_sha256,
+            gt_h5_sha256,
             csha,
             candidate_k,
             horizon,
         ):
             skipped += 1
+            completed_mask[selected_position] = True
         else:
             if part_path.exists():
                 regenerated += 1
-            pending.append(row)
+            pending.append((selected_position, row, csha))
 
-    print("========== FLARE validation batch scoring ==========")
+    print("========== LIBERO-Plus FLARE batch scoring ==========")
     print("manifest samples       :", len(all_rows))
     print("selected samples       :", len(selected_rows))
     print("pending                :", len(pending))
@@ -1033,6 +1276,7 @@ def main() -> None:
     print("batch size             :", args.batch_size)
     print("history/H/K            :", history_size, horizon, candidate_k)
     print("checkpoint SHA-256     :", checkpoint_sha256)
+    print("GT H5 SHA-256          :", gt_h5_sha256)
     print("candidate summary      :", generation_summary.get("status"))
 
     started = time.time()
@@ -1051,12 +1295,13 @@ def main() -> None:
         model, checkpoint = build_model(cfg, args.checkpoint, device)
 
         with h5py.File(args.gt_h5, "r") as h5:
-            if not bool(h5.attrs.get("complete", False)):
-                raise RuntimeError("GT latent H5 is not marked complete")
-            if False:
-                raise RuntimeError("GT latent H5 is not in LeRobot episode order")
-            if False:
-                raise RuntimeError("GT latent H5/checkpoint SHA-256 mismatch")
+            ep_offsets = validate_h5_contract(
+                h5=h5,
+                checkpoint_path=args.checkpoint,
+                checkpoint=checkpoint,
+                checkpoint_sha256=checkpoint_sha256,
+                horizon=horizon,
+            )
             mean, std = action_stats(h5["frame_action"])
 
             total_batches = math.ceil(len(pending) / args.batch_size)
@@ -1064,19 +1309,21 @@ def main() -> None:
                 chunks(pending, args.batch_size), start=1
             ):
                 prepared_items: list[dict[str, Any]] = []
-                for row in batch_rows:
+                for selected_position, row, candidate_sha256 in batch_rows:
                     try:
-                        prepared_items.append(
-                            prepare_sample(
-                                row=row,
-                                candidate_file=candidate_path(args.candidate_dir, row),
-                                h5=h5,
-                                candidate_k=candidate_k,
-                                history_size=history_size,
-                                horizon=horizon,
-                                manifest_sha256=manifest_sha256,
-                            )
+                        prepared = prepare_sample(
+                            row=row,
+                            candidate_file=candidate_path(args.candidate_dir, row),
+                            candidate_sha256=candidate_sha256,
+                            h5=h5,
+                            ep_offsets=ep_offsets,
+                            candidate_k=candidate_k,
+                            history_size=history_size,
+                            horizon=horizon,
+                            manifest_sha256=manifest_sha256,
                         )
+                        prepared["selected_position"] = selected_position
+                        prepared_items.append(prepared)
                     except Exception as exc:
                         failed += 1
                         failure = {
@@ -1122,6 +1369,7 @@ def main() -> None:
                             oracle_predicted=oracle_predicted,
                             checkpoint_sha256=checkpoint_sha256,
                             manifest_sha256=manifest_sha256,
+                            gt_h5_sha256=gt_h5_sha256,
                             scoring_seconds=per_sample_seconds,
                             save_predicted_latents=args.save_predicted_latents,
                         )
@@ -1132,11 +1380,13 @@ def main() -> None:
                             item["row"],
                             manifest_sha256,
                             checkpoint_sha256,
+                            gt_h5_sha256,
                             item["candidate_sha256"],
                             candidate_k,
                             horizon,
                         ):
                             raise RuntimeError("Saved score part failed post-write validation")
+                        completed_mask[item["selected_position"]] = True
                         generated += 1
                         append_jsonl(
                             events_path,
@@ -1179,10 +1429,12 @@ def main() -> None:
 
     aggregation = aggregate_results(
         selected_rows=selected_rows,
+        completed_mask=completed_mask,
         parts_dir=parts_dir,
         output_dir=output_dir,
         manifest_sha256=manifest_sha256,
         checkpoint_sha256=checkpoint_sha256,
+        gt_h5_sha256=gt_h5_sha256,
         candidate_k=candidate_k,
         horizon=horizon,
     )
@@ -1194,9 +1446,15 @@ def main() -> None:
         if failed == 0 and aggregation.get("status") == "PASS"
         else "PARTIAL_OR_FAIL",
         "manifest": str(args.manifest),
+        "manifest_format": FULL_MANIFEST_FORMAT,
         "manifest_sha256": manifest_sha256,
+        "manifest_samples": len(all_rows),
+        "max_samples": args.max_samples,
+        "selection_is_full_manifest": len(selected_rows) == len(all_rows),
         "candidate_dir": str(args.candidate_dir),
+        "candidate_summary": str(args.candidate_summary),
         "gt_h5": str(args.gt_h5),
+        "gt_h5_sha256": gt_h5_sha256,
         "checkpoint": str(args.checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
         "output_dir": str(output_dir),

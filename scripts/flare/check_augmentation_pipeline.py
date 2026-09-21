@@ -75,7 +75,12 @@ def load_real_frame() -> "PIL.Image.Image":
     fail("no frame decoded")
 
 
-def build_processor(extra_augmentation_config):
+def build_processor(
+    extra_augmentation_config,
+    *,
+    base_checkpoint=BASE_CHECKPOINT,
+    backbone_path=BACKBONE_PATH,
+):
     """Mirror setup.py's start_from_checkpoint path (the training code path)."""
     from transformers import AutoProcessor
 
@@ -87,7 +92,7 @@ def build_processor(extra_augmentation_config):
         fail("libero_sim modality config not registered")
 
     return AutoProcessor.from_pretrained(
-        str(BASE_CHECKPOINT),
+        str(base_checkpoint),
         # Overrides (same as gr00t/model/gr00t_n1d7/setup.py::_create_dataset)
         modality_configs=modality_configs,
         use_percentiles=True,
@@ -95,7 +100,7 @@ def build_processor(extra_augmentation_config):
         image_target_size=IMAGE_TARGET_SIZE,
         random_rotation_angle=None,
         color_jitter_params=COLOR_JITTER,
-        model_name=str(BACKBONE_PATH),
+        model_name=str(backbone_path),
         model_type="qwen",
         formalize_language=True,
         apply_sincos_state_encoding=False,

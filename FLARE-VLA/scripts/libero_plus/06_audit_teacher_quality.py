@@ -33,8 +33,10 @@ or quality-dependent weight in this direct-augmentation policy.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,28 @@ import torch
 FORMAT_SUMMARY = "flare_teacher_quality_summary_v3_direct_augmentation"
 FORMAT_RECORDS = "flare_teacher_quality_filtered_records_v3_direct_augmentation"
 POLICY_NAME = "flare_filtered_direct_augmentation"
+SCORING_RUN_FORMAT = "flare_lewm_scoring_run_summary_v1"
+VALIDATION_SUMMARY_FORMAT = "flare_validation_summary_v1"
+VALIDATION_RECORDS_FORMAT = "flare_validation_teacher_records_v1"
+MANIFEST_FORMAT = "libero_plus_sparse_manifest_v1"
+EXPECTED_MANIFEST_SAMPLES = 487_880
+EXPECTED_SUITE_COUNTS = {
+    "libero_spatial": 109_403,
+    "libero_object": 135_456,
+    "libero_goal": 98_964,
+    "libero_10": 144_057,
+}
+SUITES = set(EXPECTED_SUITE_COUNTS)
+
+SCRIPT_PATH = Path(__file__).resolve()
+FLARE_ROOT = SCRIPT_PATH.parents[2]
+ISAAC_ROOT = FLARE_ROOT.parent
+DEFAULT_MANIFEST = (
+    FLARE_ROOT / "outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl"
+)
+DEFAULT_SCORING_DIR = FLARE_ROOT / "outputs/libero_plus/teacher_scoring"
+DEFAULT_OUTPUT_DIR = FLARE_ROOT / "outputs/libero_plus/teacher_scoring_v2"
+DEFAULT_CANDIDATE_DIR = ISAAC_ROOT / "outputs/libero_plus/sparse_candidates/candidates"
 
 
 # -----------------------------------------------------------------------------
@@ -58,6 +82,33 @@ def load_torch(path: Path) -> Any:
         return torch.load(path, map_location="cpu", weights_only=False)
     except TypeError:
         return torch.load(path, map_location="cpu")
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise TypeError(f"Expected a JSON object in {path}")
+    return value
+
+
+def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_jsonl_and_count(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    count = 0
+    with path.open("rb") as handle:
+        for line in handle:
+            digest.update(line)
+            if line.strip():
+                count += 1
+    return digest.hexdigest(), count
 
 
 def to_jsonable(value: Any) -> Any:
@@ -150,6 +201,215 @@ def write_parquet_best_effort(df: pd.DataFrame, path: Path) -> dict[str, Any]:
         return {"written": True, "path": str(path), "error": None}
     except Exception as exc:
         return {"written": False, "path": str(path), "error": repr(exc)}
+
+
+def validate_scoring_run_header(
+    manifest_path: Path,
+    scoring_run_path: Path,
+    expected_samples: int,
+) -> tuple[str, int, dict[str, Any]]:
+    manifest_sha256, manifest_samples = sha256_jsonl_and_count(manifest_path)
+    scoring_run = load_json(scoring_run_path)
+
+    if scoring_run.get("format") != SCORING_RUN_FORMAT:
+        raise RuntimeError(f"Unexpected scoring run format: {scoring_run.get('format')!r}")
+    if scoring_run.get("status") != "PASS":
+        raise RuntimeError("Scoring run is not marked PASS")
+    if scoring_run.get("manifest_format") != MANIFEST_FORMAT:
+        raise RuntimeError("Scoring run does not use the full LIBERO-Plus manifest")
+    if Path(str(scoring_run.get("manifest", ""))).resolve() != manifest_path:
+        raise RuntimeError("Scoring run points to a different manifest")
+    if scoring_run.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("Scoring run manifest SHA-256 mismatch")
+    if int(scoring_run.get("manifest_samples", -1)) != manifest_samples:
+        raise RuntimeError("Scoring run manifest sample count mismatch")
+    if scoring_run.get("selection_is_full_manifest") is not True:
+        raise RuntimeError("Scoring run is a partial MAX_SAMPLES run")
+    if int(scoring_run.get("selected", -1)) != manifest_samples:
+        raise RuntimeError("Scoring run did not select every manifest sample")
+    if int(scoring_run.get("scored_parts", -1)) != manifest_samples:
+        raise RuntimeError("Scoring run does not contain every score part")
+    if int(scoring_run.get("failed", -1)) != 0:
+        raise RuntimeError("Scoring run contains failed samples")
+    if expected_samples > 0 and manifest_samples != expected_samples:
+        raise RuntimeError(
+            f"Manifest contains {manifest_samples} samples, expected {expected_samples}"
+        )
+    return manifest_sha256, manifest_samples, scoring_run
+
+
+def validate_scoring_contract(
+    manifest_path: Path,
+    scoring_run_path: Path,
+    scores_path: Path,
+    teacher_records_path: Path,
+    stepwise_path: Path,
+    validation_summary_path: Path,
+    scores: pd.DataFrame,
+    records: dict[str, Any],
+    stepwise: Any,
+    validation_summary: dict[str, Any],
+    manifest_sha256: str,
+    manifest_samples: int,
+    scoring_run: dict[str, Any],
+) -> dict[str, Any]:
+    if validation_summary.get("format") != VALIDATION_SUMMARY_FORMAT:
+        raise RuntimeError("Unexpected validation summary format")
+    if validation_summary.get("status") != "PASS":
+        raise RuntimeError("Validation summary is not marked PASS")
+    if validation_summary.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("Validation summary manifest SHA-256 mismatch")
+    if int(validation_summary.get("requested_samples", -1)) != manifest_samples:
+        raise RuntimeError("Validation summary requested-sample count mismatch")
+    if int(validation_summary.get("scored_samples", -1)) != manifest_samples:
+        raise RuntimeError("Validation summary scored-sample count mismatch")
+    if validation_summary.get("missing_samples"):
+        raise RuntimeError("Validation summary contains missing samples")
+
+    checkpoint_sha256 = str(scoring_run.get("checkpoint_sha256", ""))
+    gt_h5_sha256 = str(scoring_run.get("gt_h5_sha256", ""))
+    for key, expected in (
+        ("checkpoint_sha256", checkpoint_sha256),
+        ("gt_h5_sha256", gt_h5_sha256),
+    ):
+        if len(expected) != 64:
+            raise RuntimeError(f"Scoring run has invalid {key}")
+        if validation_summary.get(key) != expected:
+            raise RuntimeError(f"Validation summary {key} mismatch")
+        if records.get(key) != expected:
+            raise RuntimeError(f"Teacher records {key} mismatch")
+
+    if records.get("format") != VALIDATION_RECORDS_FORMAT:
+        raise RuntimeError(f"Unexpected validation teacher format: {records.get('format')!r}")
+    if records.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("Teacher records manifest SHA-256 mismatch")
+
+    required_columns = {
+        "sample_id",
+        "sample_index",
+        "suite",
+        "gt_latent_key",
+        "task_index",
+        "task_text",
+        "episode_index",
+        "local_step",
+    }
+    missing_columns = required_columns - set(scores.columns)
+    if missing_columns:
+        raise RuntimeError(f"Scores CSV is missing columns: {sorted(missing_columns)}")
+
+    n = len(scores)
+    if n != manifest_samples:
+        raise RuntimeError(f"Scores CSV has {n} rows, expected {manifest_samples}")
+    sample_ids = scores["sample_id"].astype(str).tolist()
+    if len(set(sample_ids)) != n:
+        raise RuntimeError("Scores CSV contains duplicate sample_id values")
+    sample_indices = scores["sample_index"].to_numpy(dtype=np.int64)
+    if not np.array_equal(sample_indices, np.arange(n, dtype=np.int64)):
+        raise RuntimeError("Scores CSV sample_index is not contiguous manifest order")
+
+    suites = scores["suite"].astype(str)
+    suite_counts = Counter(suites)
+    if manifest_samples == EXPECTED_MANIFEST_SAMPLES:
+        if dict(suite_counts) != EXPECTED_SUITE_COUNTS:
+            raise RuntimeError(
+                f"Scores CSV suite counts are invalid: {dict(suite_counts)}"
+            )
+    elif set(suite_counts) != SUITES:
+        raise RuntimeError(f"Scores CSV suite coverage is invalid: {dict(suite_counts)}")
+    if not np.array_equal(
+        suites.to_numpy(),
+        scores["gt_latent_key"].astype(str).to_numpy(),
+    ):
+        raise RuntimeError("Scores CSV suite/gt_latent_key mismatch")
+    task_count = int(scores["task_index"].nunique())
+    episode_count = int(scores["episode_index"].nunique())
+    if task_count != int(validation_summary.get("tasks", -1)):
+        raise RuntimeError("Scores CSV task count does not match validation summary")
+    if episode_count != int(validation_summary.get("episodes", -1)):
+        raise RuntimeError("Scores CSV episode count does not match validation summary")
+    if (
+        manifest_samples == EXPECTED_MANIFEST_SAMPLES
+        and set(scores["task_index"].astype(int)) != set(range(40))
+    ):
+        raise RuntimeError("Scores CSV does not cover canonical task indices 0..39")
+
+    record_ids = [str(value) for value in records.get("sample_ids", [])]
+    if record_ids != sample_ids:
+        raise RuntimeError("Teacher records sample order does not match scores CSV")
+    record_indices = torch.as_tensor(records.get("sample_indices")).numpy()
+    if not np.array_equal(record_indices, sample_indices):
+        raise RuntimeError("Teacher records sample indices do not match scores CSV")
+    record_suites = [str(value) for value in records.get("suites", [])]
+    if record_suites != suites.tolist():
+        raise RuntimeError("Teacher records suite order does not match scores CSV")
+    record_tasks = torch.as_tensor(records.get("task_indices")).numpy()
+    if not np.array_equal(
+        record_tasks,
+        scores["task_index"].to_numpy(dtype=np.int64),
+    ):
+        raise RuntimeError("Teacher records task indices do not match scores CSV")
+
+    candidate_k = int(validation_summary.get("candidate_k", -1))
+    horizon = int(validation_summary.get("future_horizon", -1))
+    if (candidate_k, horizon) != (4, 8):
+        raise RuntimeError(f"Expected K=4,H=8, got K={candidate_k},H={horizon}")
+    tensor_shapes = {
+        "teacher_actions_cosine_lerobot": (n, horizon, 7),
+        "teacher_actions_mse_lerobot": (n, horizon, 7),
+        "gt_actions_lerobot": (n, horizon, 7),
+        "cosine_scores": (n, candidate_k),
+        "mse_scores": (n, candidate_k),
+    }
+    for key, expected_shape in tensor_shapes.items():
+        value = torch.as_tensor(records.get(key))
+        if tuple(value.shape) != expected_shape:
+            raise RuntimeError(
+                f"Teacher records {key} shape={tuple(value.shape)}, "
+                f"expected {expected_shape}"
+            )
+        if not torch.isfinite(value).all():
+            raise RuntimeError(f"Teacher records {key} contains NaN/Inf")
+
+    if list(stepwise["sample_ids"].astype(str)) != sample_ids:
+        raise RuntimeError("Stepwise metrics sample order does not match scores CSV")
+    stepwise_shapes = {
+        "cosine_per_step": (n, candidate_k, horizon),
+        "mse_per_step": (n, candidate_k, horizon),
+        "oracle_cosine_per_step": (n, horizon),
+        "oracle_mse_per_step": (n, horizon),
+        "teacher_cosine_per_step": (n, horizon),
+        "teacher_mse_per_step": (n, horizon),
+        "teacher_by_cosine": (n,),
+        "teacher_by_mse": (n,),
+    }
+    for key, expected_shape in stepwise_shapes.items():
+        value = stepwise[key]
+        if value.shape != expected_shape:
+            raise RuntimeError(
+                f"Stepwise {key} shape={value.shape}, expected {expected_shape}"
+            )
+        if not np.isfinite(value).all():
+            raise RuntimeError(f"Stepwise {key} contains NaN/Inf")
+
+    input_paths = {
+        "manifest": manifest_path,
+        "scoring_run_summary": scoring_run_path,
+        "scores_csv": scores_path,
+        "teacher_records": teacher_records_path,
+        "stepwise_npz": stepwise_path,
+        "validation_summary": validation_summary_path,
+    }
+    return {
+        "manifest_sha256": manifest_sha256,
+        "manifest_samples": manifest_samples,
+        "checkpoint_sha256": checkpoint_sha256,
+        "gt_h5_sha256": gt_h5_sha256,
+        "suite_counts": dict(sorted(suite_counts.items())),
+        "input_sha256": {
+            key: sha256_file(value) for key, value in input_paths.items()
+        },
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -303,12 +563,39 @@ def compute_quality_level(row: pd.Series) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scores-csv", type=Path, default=Path("/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring/validation_scores.csv"))
-    parser.add_argument("--teacher-records", type=Path, default=Path("/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring/validation_teacher_records.pt"))
-    parser.add_argument("--stepwise-npz", type=Path, default=Path("/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring/validation_stepwise_metrics.npz"))
-    parser.add_argument("--validation-summary", type=Path, default=Path("/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring/validation_summary.json"))
-    parser.add_argument("--candidate-dir", type=Path, default=Path("/root/autodl-tmp/Isaac-GR00T/outputs/libero_plus/sparse_candidates/candidates"))
-    parser.add_argument("--output-dir", type=Path, default=Path("/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring"))
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--scoring-run-summary",
+        type=Path,
+        default=DEFAULT_SCORING_DIR / "scoring_run_summary.json",
+    )
+    parser.add_argument(
+        "--scores-csv",
+        type=Path,
+        default=DEFAULT_SCORING_DIR / "validation_scores.csv",
+    )
+    parser.add_argument(
+        "--teacher-records",
+        type=Path,
+        default=DEFAULT_SCORING_DIR / "validation_teacher_records.pt",
+    )
+    parser.add_argument(
+        "--stepwise-npz",
+        type=Path,
+        default=DEFAULT_SCORING_DIR / "validation_stepwise_metrics.npz",
+    )
+    parser.add_argument(
+        "--validation-summary",
+        type=Path,
+        default=DEFAULT_SCORING_DIR / "validation_summary.json",
+    )
+    parser.add_argument("--candidate-dir", type=Path, default=DEFAULT_CANDIDATE_DIR)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--expected-samples",
+        type=int,
+        default=EXPECTED_MANIFEST_SAMPLES,
+    )
     parser.add_argument("--primary-metric", choices=["mse", "cosine"], default="mse")
     parser.add_argument(
         "--agreement-policy",
@@ -328,9 +615,25 @@ def main() -> None:
     parser.add_argument("--no-candidate-actions", action="store_true", help="Do not load candidate .pt files; diversity diagnostics will be unavailable.")
     args = parser.parse_args()
 
-    for path in [args.scores_csv, args.teacher_records, args.stepwise_npz, args.validation_summary]:
-        if not path.exists():
+    input_names = (
+        "manifest",
+        "scoring_run_summary",
+        "scores_csv",
+        "teacher_records",
+        "stepwise_npz",
+        "validation_summary",
+    )
+    for name in input_names:
+        path = getattr(args, name).expanduser().resolve()
+        setattr(args, name, path)
+        if not path.is_file():
             raise FileNotFoundError(path)
+    args.candidate_dir = args.candidate_dir.expanduser().resolve()
+    args.output_dir = args.output_dir.expanduser().resolve()
+    if args.expected_samples < 1:
+        raise ValueError("--expected-samples must be >= 1")
+    if not args.no_candidate_actions and not args.candidate_dir.is_dir():
+        raise FileNotFoundError(args.candidate_dir)
     for name in [
         "action_distance_quantile",
         "jerk_quantile",
@@ -344,26 +647,40 @@ def main() -> None:
     if not (0.0 <= args.gripper_min_match_rate <= 1.0):
         raise ValueError("--gripper-min-match-rate must lie in [0,1]")
 
-    output_dir = args.output_dir.resolve()
+    manifest_sha256, manifest_samples, scoring_run = validate_scoring_run_header(
+        manifest_path=args.manifest,
+        scoring_run_path=args.scoring_run_summary,
+        expected_samples=args.expected_samples,
+    )
+
+    output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scores = pd.read_csv(args.scores_csv)
     records = load_torch(args.teacher_records)
     stepwise = np.load(args.stepwise_npz, allow_pickle=False)
-    summary = json.loads(args.validation_summary.read_text(encoding="utf-8"))
+    summary = load_json(args.validation_summary)
+
+    provenance = validate_scoring_contract(
+        manifest_path=args.manifest,
+        scoring_run_path=args.scoring_run_summary,
+        scores_path=args.scores_csv,
+        teacher_records_path=args.teacher_records,
+        stepwise_path=args.stepwise_npz,
+        validation_summary_path=args.validation_summary,
+        scores=scores,
+        records=records,
+        stepwise=stepwise,
+        validation_summary=summary,
+        manifest_sha256=manifest_sha256,
+        manifest_samples=manifest_samples,
+        scoring_run=scoring_run,
+    )
 
     sample_ids = scores["sample_id"].astype(str).tolist()
     n = len(scores)
     candidate_k = int(summary["candidate_k"])
     horizon = int(summary["future_horizon"])
-    if n == 0:
-        raise RuntimeError("scores CSV is empty")
-
-    rec_ids = [str(x) for x in records["sample_ids"]]
-    if rec_ids != sample_ids:
-        raise RuntimeError("sample_ids in validation_teacher_records.pt do not match validation_scores.csv order")
-    if list(stepwise["sample_ids"].astype(str)) != sample_ids:
-        raise RuntimeError("sample_ids in validation_stepwise_metrics.npz do not match validation_scores.csv order")
 
     teacher_by_cos = records["teacher_by_cosine"].numpy().astype(np.int64)
     teacher_by_mse = records["teacher_by_mse"].numpy().astype(np.int64)
@@ -547,8 +864,11 @@ def main() -> None:
     audit["confidence_level"] = audit["teacher_quality_level"]
     audit["rejection_reasons"] = audit.apply(build_rejection_reasons, axis=1)
 
-    # Per-task summary.
-    task_summary = audit.groupby(["task_index", "task_text"], as_index=False).agg(
+    # Keep suite identity in every aggregate; task_index is globally unique in
+    # the current manifest, but this prevents future suite-local IDs colliding.
+    task_summary = audit.groupby(
+        ["suite", "task_index", "task_text"], as_index=False
+    ).agg(
         samples=("sample_id", "count"),
         selected=("use_for_direct_augmentation", "sum"),
         direct_aug_rate=("use_for_direct_augmentation", "mean"),
@@ -575,16 +895,38 @@ def main() -> None:
     audit_parquet = output_dir / "teacher_quality_audit.parquet"
     task_csv = output_dir / "teacher_quality_task_summary.csv"
     task_parquet = output_dir / "teacher_quality_task_summary.parquet"
+    suite_csv = output_dir / "teacher_quality_suite_summary.csv"
+    suite_parquet = output_dir / "teacher_quality_suite_summary.parquet"
     selected_jsonl = output_dir / "teacher_quality_selected.jsonl"
     arrays_npz = output_dir / "teacher_quality_arrays.npz"
     filtered_pt = output_dir / "teacher_quality_filtered_records.pt"
     direct_records_pt = output_dir / "teacher_quality_direct_records.pt"
     summary_json = output_dir / "teacher_quality_summary.json"
 
+    atomic_json(
+        summary_json,
+        {
+            "format": FORMAT_SUMMARY,
+            "status": "BUILDING",
+            "manifest_sha256": provenance["manifest_sha256"],
+        },
+    )
     audit.to_csv(audit_csv, index=False)
     parquet_status = write_parquet_best_effort(audit, audit_parquet)
     task_summary.to_csv(task_csv, index=False)
     task_parquet_status = write_parquet_best_effort(task_summary, task_parquet)
+    suite_summary = audit.groupby("suite", as_index=False).agg(
+        samples=("sample_id", "count"),
+        tasks=("task_index", "nunique"),
+        episodes=("episode_index", "nunique"),
+        selected=("use_for_direct_augmentation", "sum"),
+        direct_aug_rate=("use_for_direct_augmentation", "mean"),
+        mean_best_mse=("best_mse_score", "mean"),
+        mean_oracle_mse=("oracle_mse_score", "mean"),
+        mean_teacher_gt_action_mse=("teacher_gt_action_mse", "mean"),
+    )
+    suite_summary.to_csv(suite_csv, index=False)
+    suite_parquet_status = write_parquet_best_effort(suite_summary, suite_parquet)
 
     selected = audit[audit["use_for_direct_augmentation"]].copy()
     with selected_jsonl.open("w", encoding="utf-8") as handle:
@@ -592,6 +934,8 @@ def main() -> None:
             payload = {
                 "sample_id": row["sample_id"],
                 "sample_index": int(row["sample_index"]),
+                "suite": str(row["suite"]),
+                "gt_latent_key": str(row["gt_latent_key"]),
                 "episode_index": int(row["episode_index"]),
                 "local_step": int(row["local_step"]),
                 "task_index": int(row["task_index"]),
@@ -649,8 +993,16 @@ def main() -> None:
         "direct_augmentation_no_quality_weight": True,
         "primary_metric": args.primary_metric,
         "thresholds": thresholds,
+        "manifest_sha256": provenance["manifest_sha256"],
+        "checkpoint_sha256": provenance["checkpoint_sha256"],
+        "gt_h5_sha256": provenance["gt_h5_sha256"],
         "sample_ids": selected["sample_id"].tolist(),
         "sample_indices": torch.from_numpy(selected_sample_indices),
+        "suites": selected["suite"].astype(str).tolist(),
+        "gt_latent_keys": selected["gt_latent_key"].astype(str).tolist(),
+        "task_indices": torch.from_numpy(
+            selected["task_index"].to_numpy(dtype=np.int64)
+        ),
         "teacher_idx_primary": torch.from_numpy(selected["teacher_idx_primary"].to_numpy(dtype=np.int64)),
         "teacher_quality_level": selected["teacher_quality_level"].tolist(),
         "confidence_level": selected["confidence_level"].tolist(),
@@ -674,6 +1026,11 @@ def main() -> None:
     atomic_torch(filtered_pt, filtered)
     # Same content with a name that makes the direct-augmentation semantics clear.
     atomic_torch(direct_records_pt, filtered)
+    audit_output_sha256 = {
+        "selected_jsonl": sha256_file(selected_jsonl),
+        "filtered_records": sha256_file(filtered_pt),
+        "direct_records": sha256_file(direct_records_pt),
+    }
 
     reason_counts: dict[str, int] = {}
     for reasons_text in audit["rejection_reasons"]:
@@ -688,11 +1045,20 @@ def main() -> None:
         "format": FORMAT_SUMMARY,
         "status": "PASS",
         "inputs": {
+            "manifest": str(args.manifest),
+            "scoring_run_summary": str(args.scoring_run_summary),
             "scores_csv": str(args.scores_csv),
             "teacher_records": str(args.teacher_records),
             "stepwise_npz": str(args.stepwise_npz),
             "validation_summary": str(args.validation_summary),
             "candidate_dir": None if args.no_candidate_actions else str(args.candidate_dir),
+            "sha256": provenance["input_sha256"],
+        },
+        "provenance": {
+            "manifest_format": MANIFEST_FORMAT,
+            "manifest_sha256": provenance["manifest_sha256"],
+            "checkpoint_sha256": provenance["checkpoint_sha256"],
+            "gt_h5_sha256": provenance["gt_h5_sha256"],
         },
         "selection_policy": POLICY_NAME,
         "policy_explanation": (
@@ -708,6 +1074,7 @@ def main() -> None:
         "samples": int(n),
         "tasks": int(audit["task_index"].nunique()),
         "episodes": int(audit["episode_index"].nunique()),
+        "suite_counts": provenance["suite_counts"],
         "selected_for_direct_augmentation": {
             "count": int(audit["use_for_direct_augmentation"].sum()),
             "rate": selected_rate,
@@ -745,10 +1112,13 @@ def main() -> None:
             "audit_parquet": parquet_status,
             "task_summary_csv": str(task_csv),
             "task_summary_parquet": task_parquet_status,
+            "suite_summary_csv": str(suite_csv),
+            "suite_summary_parquet": suite_parquet_status,
             "selected_jsonl": str(selected_jsonl),
             "arrays_npz": str(arrays_npz),
             "filtered_records_pt": str(filtered_pt),
             "direct_records_pt": str(direct_records_pt),
+            "sha256": audit_output_sha256,
         },
     }
     for col in [

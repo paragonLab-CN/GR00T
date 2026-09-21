@@ -755,6 +755,14 @@ class Gr00tN1d7Processor(BaseProcessor):
         processor_kwargs.setdefault("model_type", "qwen")
         processor_kwargs.setdefault("clip_outliers", True)
 
+        # Match Gr00tN1d7's inference-time backbone override. Without this,
+        # the model can load from a local gated backbone while its processor
+        # still attempts to fetch the saved Hub repo ID.
+        processor_kwargs["model_name"] = os.environ.get(
+            "GR00T_BACKBONE_MODEL_NAME",
+            processor_kwargs["model_name"],
+        )
+
         # Directly override other processor kwargs
         if kwargs:
             # Override modality configs while keeping pretrained embodiment configs

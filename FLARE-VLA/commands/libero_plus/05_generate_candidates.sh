@@ -1,66 +1,140 @@
 #!/usr/bin/env bash
-# Generate GR00T K=4 candidate action chunks for the sparse LIBERO-Plus manifest,
-# per suite (each suite's windows are proposed by that suite's GR00T-N1.7-LIBERO
-# checkpoint — the "teacher" model), then merge into a single candidate set.
+# Generate K=4 GR00T candidate action chunks for LIBERO-Plus.
 #
-# Produces:
-#   Isaac-GR00T/outputs/libero_plus/sparse_candidates/<suite>/candidates/
-#   Isaac-GR00T/outputs/libero_plus/sparse_candidates/candidates/            (merged)
-#   Isaac-GR00T/outputs/libero_plus/sparse_candidates/candidate_generation_summary.json
+# Each per-suite manifest is paired with its matching GR00T-N1.7-LIBERO
+# checkpoint. Existing valid candidate files are reused. After all four suites
+# complete, candidates are merged with full-manifest provenance for LeWM
+# scoring.
 #
-# Scale: 489,632 windows × 4 candidates; ~0.175 s/window → ~24h total.
+# Inputs:
+#   FLARE-VLA/outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl
+#   FLARE-VLA/outputs/libero_plus/manifests/per_suite/manifest_<suite>.jsonl
 #
-# Usage: bash FLARE-VLA/commands/libero_plus/05_generate_candidates.sh
+# Outputs:
+#   outputs/libero_plus/sparse_candidates/<suite>/candidates/
+#   outputs/libero_plus/sparse_candidates/candidates/
+#   outputs/libero_plus/sparse_candidates/candidate_generation_summary.json
+#
+# Current manifest scale: 487,880 windows x 4 candidates.
+#
+# Usage:
+#   bash FLARE-VLA/commands/libero_plus/05_generate_candidates.sh
 
 set -euo pipefail
 
-DATASET=/root/autodl-tmp/Isaac-GR00T/examples/LIBERO/libero_plus_lerobot
-CHECKPOINT_ROOT=/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO
-MANIFEST_DIR=/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/manifests/per_suite
-FULL_MANIFEST=/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/manifests/spatial_sparse_manifest.jsonl
-OUTPUT_ROOT=/root/autodl-tmp/Isaac-GR00T/outputs/libero_plus/sparse_candidates
+readonly SCRIPT_DIR="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1
+  pwd
+)"
+readonly FLARE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+readonly ISAAC_ROOT="$(cd -- "${FLARE_ROOT}/.." && pwd)"
+readonly DATASET="${ISAAC_ROOT}/examples/LIBERO/libero_plus_lerobot"
+readonly CHECKPOINT_ROOT="${ISAAC_ROOT}/checkpoints/GR00T-N1.7-LIBERO"
+readonly BACKBONE_MODEL="${ISAAC_ROOT}/checkpoints/Cosmos-Reason2-2B"
+readonly MANIFEST_DIR="${FLARE_ROOT}/outputs/libero_plus/manifests/per_suite"
+readonly FULL_MANIFEST="${FLARE_ROOT}/outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl"
+readonly OUTPUT_ROOT="${ISAAC_ROOT}/outputs/libero_plus/sparse_candidates"
+readonly GENERATOR="${ISAAC_ROOT}/scripts/flare/04_generate_validation_candidates.py"
+readonly MERGER="${FLARE_ROOT}/scripts/libero_plus/04_merge_candidate_summaries.py"
+readonly MANIFEST_FORMAT="libero_plus_per_suite_manifest_v2"
+readonly MERGE_WORKERS="${MERGE_WORKERS:-12}"
+readonly -a SUITES=(
+  libero_spatial
+  libero_object
+  libero_goal
+  libero_10
+)
 
-cd /root/autodl-tmp/Isaac-GR00T
+for required_file in "${FULL_MANIFEST}" "${GENERATOR}" "${MERGER}"; do
+  if [[ ! -f "${required_file}" ]]; then
+    echo "ERROR: required file is missing: ${required_file}" >&2
+    exit 1
+  fi
+done
+for backbone_file in config.json model.safetensors preprocessor_config.json tokenizer_config.json; do
+  if [[ ! -f "${BACKBONE_MODEL}/${backbone_file}" ]]; then
+    echo "ERROR: local Cosmos backbone is incomplete: ${BACKBONE_MODEL}/${backbone_file}" >&2
+    exit 1
+  fi
+done
+if [[ ! -d "${DATASET}" ]]; then
+  echo "ERROR: LIBERO-Plus dataset is missing: ${DATASET}" >&2
+  exit 1
+fi
+if [[ ! "${MERGE_WORKERS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: MERGE_WORKERS must be a positive integer" >&2
+  exit 1
+fi
+
+for suite in "${SUITES[@]}"; do
+  manifest="${MANIFEST_DIR}/manifest_${suite}.jsonl"
+  model="${CHECKPOINT_ROOT}/${suite}"
+  if [[ ! -f "${manifest}" ]]; then
+    echo "ERROR: per-suite manifest is missing: ${manifest}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${model}/config.json" ]]; then
+    echo "ERROR: checkpoint config is missing: ${model}/config.json" >&2
+    exit 1
+  fi
+  if [[ ! -f "${model}/model.safetensors.index.json" ]]; then
+    echo "ERROR: checkpoint weights index is missing: ${model}" >&2
+    exit 1
+  fi
+done
+
+cd "${ISAAC_ROOT}"
+mkdir -p "${OUTPUT_ROOT}"
 
 export OMP_NUM_THREADS=8
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONHASHSEED=0
 export UV_LINK_MODE=copy
 
-for SUITE in libero_spatial libero_object libero_goal libero_10; do
-    MANIFEST="${MANIFEST_DIR}/manifest_${SUITE}.jsonl"
-    MODEL="${CHECKPOINT_ROOT}/${SUITE}"
-    OUT="${OUTPUT_ROOT}/${SUITE}"
-    mkdir -p "${OUT}"
+# The Cosmos backbone is gated on Hugging Face. All required files already
+# live in this checkout, so keep both the model and processor strictly local.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export NO_ALBUMENTATIONS_UPDATE=1
+export GR00T_BACKBONE_MODEL_NAME="${BACKBONE_MODEL}"
 
-    echo
-    echo "============================================"
-    echo "  Candidate generation: ${SUITE}"
-    echo "  Manifest: ${MANIFEST}"
-    echo "  Model   : ${MODEL}"
-    echo "  Output  : ${OUT}"
-    echo "============================================"
+for suite in "${SUITES[@]}"; do
+  manifest="${MANIFEST_DIR}/manifest_${suite}.jsonl"
+  model="${CHECKPOINT_ROOT}/${suite}"
+  output="${OUTPUT_ROOT}/${suite}"
+  mkdir -p "${output}"
 
-    uv run --no-sync python \
-      scripts/flare/04_generate_validation_candidates.py \
-      --manifest "${MANIFEST}" \
-      --dataset-path "${DATASET}" \
-      --model-path "${MODEL}" \
-      --output-dir "${OUT}" \
-      --embodiment-tag LIBERO_PANDA \
-      --video-backend torchcodec \
-      --action-horizon 8 \
-      2>&1 | tee "${OUT}/candidate_generation.log"
+  echo
+  echo "============================================"
+  echo "  Candidate generation: ${suite}"
+  echo "  Manifest: ${manifest}"
+  echo "  Model   : ${model}"
+  echo "  Output  : ${output}"
+  echo "============================================"
+
+  uv run --no-sync python "${GENERATOR}" \
+    --manifest "${manifest}" \
+    --dataset-path "${DATASET}" \
+    --model-path "${model}" \
+    --output-dir "${output}" \
+    --expected-suite "${suite}" \
+    --manifest-format "${MANIFEST_FORMAT}" \
+    --embodiment-tag LIBERO_PANDA \
+    --video-backend torchcodec \
+    --action-horizon 8 \
+    2>&1 | tee "${output}/candidate_generation.log"
 done
 
 echo
 echo "============================================"
-echo "  Merging per-suite candidates"
+echo "  Validating and merging per-suite candidates"
 echo "============================================"
-/root/autodl-tmp/envs/LeWorldModel/bin/python \
-  /root/autodl-tmp/FLARE-VLA/scripts/libero_plus/04_merge_candidate_summaries.py \
+uv run --no-sync python "${MERGER}" \
   --manifest "${FULL_MANIFEST}" \
-  --suite-dir "${OUTPUT_ROOT}"
+  --per-suite-manifest-dir "${MANIFEST_DIR}" \
+  --suite-dir "${OUTPUT_ROOT}" \
+  --workers "${MERGE_WORKERS}"
 
-echo ""
-echo "Done. Merged candidates at: ${OUTPUT_ROOT}/candidates/"
+printf '\nDone.\n  Merged candidates: %s\n  Summary: %s\n' \
+  "${OUTPUT_ROOT}/candidates" \
+  "${OUTPUT_ROOT}/candidate_generation_summary.json"

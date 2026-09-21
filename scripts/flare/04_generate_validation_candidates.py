@@ -106,7 +106,10 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def validate_manifest(rows: list[dict[str, Any]]) -> None:
+def validate_manifest(
+    rows: list[dict[str, Any]],
+    expected_suite: str | None = None,
+) -> None:
     sample_ids = [str(row["sample_id"]) for row in rows]
     if len(sample_ids) != len(set(sample_ids)):
         raise RuntimeError("Manifest contains duplicate sample_id values")
@@ -119,6 +122,19 @@ def validate_manifest(rows: list[dict[str, Any]]) -> None:
 
     all_candidate_seeds: list[int] = []
     for row in rows:
+        if expected_suite is not None:
+            if row.get("suite") != expected_suite:
+                raise RuntimeError(
+                    f"Manifest sample {row['sample_id']} has suite="
+                    f"{row.get('suite')!r}, expected {expected_suite!r}"
+                )
+            if row.get("gt_latent_key") != expected_suite:
+                raise RuntimeError(
+                    f"Manifest sample {row['sample_id']} has "
+                    f"gt_latent_key={row.get('gt_latent_key')!r}, "
+                    f"expected {expected_suite!r}"
+                )
+
         local_step = int(row["local_step"])
         episode_length = int(row["episode_length"])
         if local_step < 2 or local_step > episode_length - 9:
@@ -159,6 +175,9 @@ def validate_existing_candidate(
     path: Path,
     manifest_row: dict[str, Any],
     action_horizon: int,
+    manifest_sha256: str,
+    manifest_format: str,
+    model_path: str,
 ) -> tuple[bool, str]:
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -170,6 +189,12 @@ def validate_existing_candidate(
     try:
         if payload.get("format") != FORMAT:
             return False, f"format={payload.get('format')!r}"
+        if payload.get("manifest_sha256") != manifest_sha256:
+            return False, "manifest_sha256 mismatch"
+        if payload.get("manifest_format") != manifest_format:
+            return False, "manifest_format mismatch"
+        if payload.get("model_path") != model_path:
+            return False, "model_path mismatch"
         if payload.get("sample_id") != manifest_row["sample_id"]:
             return False, "sample_id mismatch"
         if int(payload.get("episode_index")) != int(manifest_row["episode_index"]):
@@ -180,6 +205,9 @@ def validate_existing_candidate(
             return False, "global_index mismatch"
         if int(payload.get("window_index_h8")) != int(manifest_row["window_index_h8"]):
             return False, "window_index_h8 mismatch"
+        for key in ("suite", "gt_latent_key"):
+            if key in manifest_row and payload.get(key) != manifest_row[key]:
+                return False, f"{key} mismatch"
 
         actions = torch.as_tensor(payload["candidate_actions_concat"])
         expected_shape = (
@@ -227,6 +255,19 @@ def main() -> None:
     parser.add_argument("--dataset-path", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--expected-suite",
+        default=None,
+        help=(
+            "Require every manifest row to use this suite and require the "
+            "model directory basename to match it."
+        ),
+    )
+    parser.add_argument(
+        "--manifest-format",
+        default="flare_validation_manifest_v1",
+        help="Provenance label written into each candidate payload.",
+    )
     parser.add_argument("--embodiment-tag", default="LIBERO_PANDA")
     parser.add_argument(
         "--video-backend",
@@ -251,13 +292,21 @@ def main() -> None:
     for path in (args.manifest, args.dataset_path, args.model_path):
         if not path.exists():
             raise FileNotFoundError(path)
+    if (
+        args.expected_suite is not None
+        and args.model_path.resolve().name != args.expected_suite
+    ):
+        raise RuntimeError(
+            f"Model directory {args.model_path.resolve()} does not match "
+            f"expected suite {args.expected_suite!r}"
+        )
     if args.action_horizon != 8:
         raise ValueError("Current FLARE validation manifest and GT framebank require H=8")
     if args.start_index < 0:
         raise ValueError("--start-index must be >= 0")
 
     manifest_rows = load_jsonl(args.manifest)
-    validate_manifest(manifest_rows)
+    validate_manifest(manifest_rows, args.expected_suite)
     manifest_sha256 = sha256_file(args.manifest)
 
     selected_rows = [
@@ -370,7 +419,12 @@ def main() -> None:
 
             if output_path.exists() and not args.overwrite:
                 valid, reason = validate_existing_candidate(
-                    output_path, row, args.action_horizon
+                    output_path,
+                    row,
+                    args.action_horizon,
+                    manifest_sha256,
+                    args.manifest_format,
+                    str(args.model_path.resolve()),
                 )
                 if valid:
                     counters["skipped_valid"] += 1
@@ -467,8 +521,11 @@ def main() -> None:
 
                 payload: dict[str, Any] = {
                     "format": FORMAT,
-                    "manifest_format": "flare_validation_manifest_v1",
+                    "manifest_format": args.manifest_format,
                     "manifest_sha256": manifest_sha256,
+                    "model_path": str(args.model_path.resolve()),
+                    "suite": row.get("suite"),
+                    "gt_latent_key": row.get("gt_latent_key"),
                     "sample_id": sample_id,
                     "sample_index": sample_index,
                     "episode_index": int(row["episode_index"]),
@@ -510,7 +567,12 @@ def main() -> None:
 
                 atomic_torch_save(payload, output_path)
                 valid, reason = validate_existing_candidate(
-                    output_path, row, args.action_horizon
+                    output_path,
+                    row,
+                    args.action_horizon,
+                    manifest_sha256,
+                    args.manifest_format,
+                    str(args.model_path.resolve()),
                 )
                 if not valid:
                     raise RuntimeError(f"Post-save validation failed: {reason}")
@@ -564,6 +626,8 @@ def main() -> None:
         "model_path": str(args.model_path.resolve()),
         "output_dir": str(output_dir),
         "embodiment_tag": args.embodiment_tag,
+        "expected_suite": args.expected_suite,
+        "manifest_format": args.manifest_format,
         "action_horizon": args.action_horizon,
         "save_initial_noises": bool(args.save_initial_noises),
         "save_observations": bool(args.save_observations),

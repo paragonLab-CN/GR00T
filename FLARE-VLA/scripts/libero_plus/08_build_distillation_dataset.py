@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
-"""Build the FLARE-VLA Filtered Direct Augmentation training index.
+"""Build the full four-suite LIBERO-Plus FLARE distillation sidecars.
 
-This stage does not rewrite the original LeRobot parquet/video dataset. It joins:
-
-1. the fixed FLARE validation manifest (all windows remain GT samples), and
-2. the quality-filtered direct teacher records selected by
-   06_audit_teacher_quality.py.
-
-The resulting mixed index contains all GT records plus the selected FLARE teacher
-records. Teacher actions remain in raw LeRobot convention with shape [N, 8, 7].
-They are intentionally *not* padded to the GR00T model horizon here.
-
-Expected wrapper behaviour for a teacher record:
-
-    processed_action, processed_mask = load_official_gr00t_sample(...)
-    processed_action[:teacher_horizon] = normalize(teacher_action)
-    processed_mask[:teacher_horizon] = 1
-    processed_mask[teacher_horizon:] = 0
-
-In practice, the replacement must occur at the same representation stage as the
-normal GR00T action target (before or after normalization consistently). Loading
-the official GT chunk first keeps the unsupervised tail numerically plausible,
-while the zero tail mask guarantees that only the FLARE prefix contributes to
-loss.
+This script joins the 487,880-window full LIBERO-Plus manifest with the
+quality-filtered teacher records produced by 06b. It validates source hashes,
+suite identity, action tensors, and the GR00T action interface of all four
+suite checkpoints before writing sidecars consumed by
+``FlareDistillationDataset``.
 
 Outputs:
-  * distillation_index.jsonl       mixed GT/teacher window index
-  * teacher_records_enriched.pt    selected teacher tensors plus dataset mapping
-  * distillation_summary.json      provenance, counts, interface contract
+  * distillation_index.jsonl        mixed GT + teacher window index
+  * teacher_index.jsonl             teacher-only subset (for weighted mixing)
+  * teacher_records_enriched.pt     v1 format with all required fields
+  * distillation_summary.json       provenance, counts, interface contract
 """
 
 from __future__ import annotations
@@ -46,159 +30,77 @@ import torch
 FORMAT_VERSION = "flare_distillation_index_v1"
 TEACHER_FORMAT_VERSION = "flare_distillation_teacher_records_v1"
 SUMMARY_FORMAT_VERSION = "flare_distillation_summary_v1"
-
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def first_existing(*paths: Path) -> Path:
-    for path in paths:
-        if path.exists():
-            return path
-    return paths[0]
-
-
-def default_paths() -> dict[str, Path]:
-    root = repo_root()
-    local_manifest_dir = (
-        root
-        / "patches"
-        / "isaac_gr00t"
-        / "current_active"
-        / "outputs"
-        / "flare_validation_500"
-    )
-    local_audit_dir = (
-        root
-        / "patches"
-        / "le_wm"
-        / "current_active"
-        / "outputs"
-        / "flare_validation_500"
-        / "teacher_quality_audit_direct"
-    )
-    local_checkpoint_dir = (
-        root
-        / "patches"
-        / "isaac_gr00t"
-        / "current_active"
-        / "checkpoints"
-        / "GR00T-N1.7-LIBERO"
-        / "libero_10"
-    )
-
-    server_manifest_dir = Path(
-        "/root/autodl-tmp/Isaac-GR00T/outputs/flare_validation_500"
-    )
-    server_audit_dir = Path(
-        "/root/autodl-tmp/le-wm/outputs/flare_validation_500/teacher_quality_audit_direct"
-    )
-    server_checkpoint_dir = Path(
-        "/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/libero_10"
-    )
-    server_output_root = Path("/root/autodl-tmp/Isaac-GR00T")
-
-    return {
-        "manifest": first_existing(
-            local_manifest_dir / "validation_manifest.jsonl",
-            server_manifest_dir / "validation_manifest.jsonl",
-        ),
-        "manifest_summary": first_existing(
-            local_manifest_dir / "validation_manifest_summary.json",
-            server_manifest_dir / "validation_manifest_summary.json",
-        ),
-        "teacher_selected": first_existing(
-            local_audit_dir / "teacher_quality_selected.jsonl",
-            server_audit_dir / "teacher_quality_selected.jsonl",
-        ),
-        "teacher_records": first_existing(
-            local_audit_dir / "teacher_quality_filtered_records.pt",
-            server_audit_dir / "teacher_quality_filtered_records.pt",
-        ),
-        "teacher_summary": first_existing(
-            local_audit_dir / "teacher_quality_summary.json",
-            server_audit_dir / "teacher_quality_summary.json",
-        ),
-        "checkpoint_config": first_existing(
-            local_checkpoint_dir / "config.json",
-            server_checkpoint_dir / "config.json",
-        ),
-        "processor_config": first_existing(
-            local_checkpoint_dir / "processor_config.json",
-            server_checkpoint_dir / "processor_config.json",
-        ),
-        "output_dir": (
-            server_output_root / "outputs" / "flare_distillation_filtered_direct"
-            if server_output_root.is_dir()
-            else root / "outputs" / "flare_distillation_filtered_direct"
-        ),
-    }
+MANIFEST_FORMAT = "libero_plus_sparse_manifest_v1"
+MANIFEST_SUMMARY_FORMAT = "libero_plus_sparse_manifest_v1"
+TEACHER_SUMMARY_FORMAT = "flare_teacher_quality_summary_v3_direct_augmentation"
+FILTERED_RECORDS_FORMAT = "flare_teacher_quality_filtered_records_v3_direct_augmentation"
+LIBERO_PLUS_MANIFEST_COUNT = 487_880
+EXPECTED_SUITE_COUNTS = {
+    "libero_spatial": 109_403,
+    "libero_object": 135_456,
+    "libero_goal": 98_964,
+    "libero_10": 144_057,
+}
+SUITES = tuple(EXPECTED_SUITE_COUNTS)
 
 
 def parse_args() -> argparse.Namespace:
-    defaults = default_paths()
     parser = argparse.ArgumentParser(
         description=(
-            "Build a mixed GT + quality-filtered FLARE teacher index without "
+            "Build a validated four-suite LIBERO-Plus teacher index without "
             "modifying the original LeRobot dataset."
         )
     )
-    parser.add_argument("--manifest", type=Path, default=defaults["manifest"])
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--manifest-summary", type=Path, required=True)
+    parser.add_argument("--teacher-selected", type=Path, required=True)
+    parser.add_argument("--teacher-records", type=Path, required=True)
+    parser.add_argument("--teacher-summary", type=Path, required=True)
     parser.add_argument(
-        "--manifest-summary", type=Path, default=defaults["manifest_summary"]
+        "--checkpoint-root",
+        type=Path,
+        required=True,
+        help="Directory containing libero_spatial/object/goal/10 checkpoints.",
     )
-    parser.add_argument(
-        "--teacher-selected", type=Path, default=defaults["teacher_selected"]
-    )
-    parser.add_argument(
-        "--teacher-records", type=Path, default=defaults["teacher_records"]
-    )
-    parser.add_argument(
-        "--teacher-summary", type=Path, default=defaults["teacher_summary"]
-    )
-    parser.add_argument(
-        "--checkpoint-config", type=Path, default=defaults["checkpoint_config"]
-    )
-    parser.add_argument(
-        "--processor-config", type=Path, default=defaults["processor_config"]
-    )
-    parser.add_argument("--output-dir", type=Path, default=defaults["output_dir"])
+    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--embodiment-key",
         default="libero_sim",
-        help="Processor modality-config key used for GR00T LIBERO training.",
+        help="Processor modality-config key for GR00T training.",
     )
     parser.add_argument(
         "--index-mode",
         choices=["mixed", "teacher_only"],
-        default="mixed",
+        default="teacher_only",
         help=(
             "mixed writes manifest GT rows plus selected teacher rows. "
-            "teacher_only writes only teacher rows so the original full LeRobot "
-            "dataset can be supplied as a separate weighted GT data source."
+            "teacher_only writes only teacher rows for use with "
+            "--keep-full-gt-dataset."
         ),
     )
     parser.add_argument(
         "--mix-order",
         choices=["gt_then_teacher", "interleave"],
         default="gt_then_teacher",
-        help=(
-            "Record ordering for index-mode=mixed only. It does not define "
-            "DataLoader sampling."
-        ),
     )
     parser.add_argument(
         "--expected-gt-count",
         type=int,
-        default=500,
-        help="Set to 0 to disable the current 500-window protocol check.",
+        default=LIBERO_PLUS_MANIFEST_COUNT,
+        help=f"Expected manifest row count (default {LIBERO_PLUS_MANIFEST_COUNT}).",
     )
     parser.add_argument(
         "--expected-teacher-count",
         type=int,
         default=0,
         help="Set to a positive value to enforce an exact selected-teacher count.",
+    )
+    parser.add_argument(
+        "--quality-levels",
+        nargs="+",
+        choices=["high", "medium"],
+        default=["high", "medium"],
+        help="Teacher quality levels to include (default: high medium).",
     )
     parser.add_argument(
         "--dry-run",
@@ -320,7 +222,7 @@ def tensor_1d(value: Any, *, name: str, length: int, dtype: torch.dtype) -> torc
 
 def validate_manifest(
     rows: list[dict[str, Any]], expected_count: int
-) -> tuple[dict[str, dict[str, Any]], int]:
+) -> tuple[dict[str, dict[str, Any]], int, dict[str, int]]:
     if not rows:
         raise RuntimeError("Manifest is empty")
     if expected_count > 0 and len(rows) != expected_count:
@@ -331,15 +233,21 @@ def validate_manifest(
     required = [
         "sample_id",
         "sample_index",
+        "suite",
+        "gt_latent_key",
         "episode_index",
+        "lewm_episode_index",
         "local_step",
+        "global_index",
         "task_index",
         "task_text",
         "window_horizon",
         "history_size",
+        "candidate_k",
     ]
     by_id: dict[str, dict[str, Any]] = {}
     horizons: set[int] = set()
+    suite_counts: Counter[str] = Counter()
     for row_index, row in enumerate(rows):
         require_fields(row, required, f"manifest row {row_index}")
         sample_id = str(row["sample_id"])
@@ -351,22 +259,44 @@ def validate_manifest(
                 f"Manifest row {row_index} has sample_index={sample_index}; "
                 "the current pipeline requires contiguous manifest order"
             )
+
+        suite = str(row["suite"])
+        if suite not in SUITES or row["gt_latent_key"] != suite:
+            raise RuntimeError(
+                f"{sample_id} has invalid suite/gt_latent_key: "
+                f"{suite!r}/{row['gt_latent_key']!r}"
+            )
+        if int(row["lewm_episode_index"]) != int(row["episode_index"]):
+            raise RuntimeError(f"{sample_id} is not in LeRobot episode order")
         if int(row["episode_index"]) < 0 or int(row["local_step"]) < 0:
             raise RuntimeError(f"Negative episode/local step in manifest sample {sample_id}")
+
         horizon = int(row["window_horizon"])
-        if horizon < 1:
-            raise RuntimeError(f"Invalid window_horizon={horizon} for {sample_id}")
-        if "future_rows" in row and len(row["future_rows"]) != horizon:
+        if (
+            horizon != 8
+            or int(row["history_size"]) != 3
+            or int(row["candidate_k"]) != 4
+        ):
+            raise RuntimeError(f"{sample_id} does not satisfy history=3,H=8,K=4")
+        if len(row.get("future_rows", [])) != horizon:
             raise RuntimeError(
-                f"{sample_id} future_rows length={len(row['future_rows'])}, "
+                f"{sample_id} future_rows length={len(row.get('future_rows', []))}, "
                 f"expected {horizon}"
             )
         horizons.add(horizon)
+        suite_counts[suite] += 1
         by_id[sample_id] = row
 
     if len(horizons) != 1:
         raise RuntimeError(f"Manifest contains multiple horizons: {sorted(horizons)}")
-    return by_id, horizons.pop()
+    if expected_count == LIBERO_PLUS_MANIFEST_COUNT:
+        if dict(suite_counts) != EXPECTED_SUITE_COUNTS:
+            raise RuntimeError(
+                f"Manifest suite counts are invalid: {dict(suite_counts)}"
+            )
+    elif set(suite_counts) != set(SUITES):
+        raise RuntimeError(f"Manifest suite coverage is invalid: {dict(suite_counts)}")
+    return by_id, horizons.pop(), dict(sorted(suite_counts.items()))
 
 
 def validate_checkpoint_interface(
@@ -448,10 +378,17 @@ def validate_teacher_records(
         )
     if not selected_rows:
         raise RuntimeError("Selected teacher JSONL is empty")
+    if records.get("format") != FILTERED_RECORDS_FORMAT:
+        raise RuntimeError(
+            f"Unexpected filtered teacher format: {records.get('format')!r}"
+        )
 
     required_record_keys = [
         "sample_ids",
         "sample_indices",
+        "suites",
+        "gt_latent_keys",
+        "task_indices",
         "teacher_idx_primary",
         "confidence_weight",
         "teacher_actions_lerobot",
@@ -475,6 +412,16 @@ def validate_teacher_records(
         raise RuntimeError(f"Teacher PT contains {n} rows, expected {expected_count}")
     if len(set(sample_ids)) != n:
         raise RuntimeError("Filtered teacher records contain duplicate sample_ids")
+    record_suites = [str(value) for value in records["suites"]]
+    record_gt_keys = [str(value) for value in records["gt_latent_keys"]]
+    if len(record_suites) != n or len(record_gt_keys) != n:
+        raise RuntimeError("Filtered teacher suite metadata length mismatch")
+    record_task_indices = tensor_1d(
+        records["task_indices"],
+        name="task_indices",
+        length=n,
+        dtype=torch.long,
+    )
 
     teacher_actions = torch.as_tensor(
         records["teacher_actions_lerobot"], dtype=torch.float32
@@ -557,6 +504,8 @@ def validate_teacher_records(
     selected_required = [
         "sample_id",
         "sample_index",
+        "suite",
+        "gt_latent_key",
         "episode_index",
         "local_step",
         "task_index",
@@ -569,6 +518,8 @@ def validate_teacher_records(
     task_indices: list[int] = []
     global_indices: list[int] = []
     confidence_levels: list[str] = []
+    suites: list[str] = []
+    gt_latent_keys: list[str] = []
 
     for teacher_row, selected in enumerate(selected_rows):
         require_fields(selected, selected_required, f"selected teacher row {teacher_row}")
@@ -582,6 +533,19 @@ def validate_teacher_records(
             raise RuntimeError(f"Selected teacher {selected_id} is absent from manifest")
 
         manifest = manifest_by_id[selected_id]
+        selected_suite = str(selected["suite"])
+        selected_gt_key = str(selected["gt_latent_key"])
+        if selected_suite != str(manifest["suite"]):
+            raise RuntimeError(f"{selected_id} suite mismatch against manifest")
+        if selected_gt_key != selected_suite:
+            raise RuntimeError(f"{selected_id} gt_latent_key mismatch")
+        if record_suites[teacher_row] != selected_suite:
+            raise RuntimeError(f"{selected_id} suite mismatch between PT and JSONL")
+        if record_gt_keys[teacher_row] != selected_gt_key:
+            raise RuntimeError(
+                f"{selected_id} gt_latent_key mismatch between PT and JSONL"
+            )
+
         comparisons = {
             "sample_index": int(selected["sample_index"]),
             "episode_index": int(selected["episode_index"]),
@@ -600,6 +564,8 @@ def validate_teacher_records(
             raise RuntimeError(f"{selected_id} sample_index mismatch between PT and JSONL")
         if int(teacher_idx[teacher_row]) != int(selected["teacher_idx_primary"]):
             raise RuntimeError(f"{selected_id} teacher_idx mismatch between PT and JSONL")
+        if int(record_task_indices[teacher_row]) != int(selected["task_index"]):
+            raise RuntimeError(f"{selected_id} task_index mismatch between PT and JSONL")
         if not math.isclose(
             float(confidence_weight[teacher_row]),
             float(selected["confidence_weight"]),
@@ -615,6 +581,8 @@ def validate_teacher_records(
         task_indices.append(int(manifest["task_index"]))
         global_indices.append(int(manifest.get("global_index", -1)))
         confidence_levels.append(str(selected["confidence_level"]))
+        suites.append(selected_suite)
+        gt_latent_keys.append(selected_gt_key)
 
     return {
         "source_format": str(records.get("format", "unknown")),
@@ -622,6 +590,8 @@ def validate_teacher_records(
         "thresholds": records.get("thresholds", {}),
         "sample_ids": sample_ids,
         "sample_indices": sample_indices,
+        "suites": suites,
+        "gt_latent_keys": gt_latent_keys,
         "episode_indices": torch.tensor(episode_indices, dtype=torch.long),
         "local_steps": torch.tensor(local_steps, dtype=torch.long),
         "task_indices": torch.tensor(task_indices, dtype=torch.long),
@@ -643,6 +613,8 @@ def common_index_fields(manifest: dict[str, Any]) -> dict[str, Any]:
     fields = {
         "sample_id": str(manifest["sample_id"]),
         "sample_index": int(manifest["sample_index"]),
+        "suite": str(manifest["suite"]),
+        "gt_latent_key": str(manifest["gt_latent_key"]),
         "episode_index": int(manifest["episode_index"]),
         "local_step": int(manifest["local_step"]),
         "task_index": int(manifest["task_index"]),
@@ -679,18 +651,19 @@ def build_index(
     for manifest in manifest_rows:
         sample_id = str(manifest["sample_id"])
         base = common_index_fields(manifest)
-        gt_rows.append(
-            {
-                **base,
-                "format": FORMAT_VERSION,
-                "record_id": f"{sample_id}:gt",
-                "source": "gt",
-                "target_source": "lerobot_dataset",
-                "teacher_row": None,
-                "confidence_weight": 1.0,
-                "supervision_policy": "official_gr00t_action_mask",
-            }
-        )
+        if index_mode == "mixed":
+            gt_rows.append(
+                {
+                    **base,
+                    "format": FORMAT_VERSION,
+                    "record_id": f"{sample_id}:gt",
+                    "source": "gt",
+                    "target_source": "lerobot_dataset",
+                    "teacher_row": None,
+                    "confidence_weight": 1.0,
+                    "supervision_policy": "official_gr00t_action_mask",
+                }
+            )
 
         if sample_id in teacher_row_by_id:
             teacher_row = teacher_row_by_id[sample_id]
@@ -749,14 +722,34 @@ def build_index(
 
 def main() -> None:
     args = parse_args()
+    for name in (
+        "manifest",
+        "manifest_summary",
+        "teacher_selected",
+        "teacher_records",
+        "teacher_summary",
+        "checkpoint_root",
+        "output_dir",
+    ):
+        setattr(args, name, getattr(args, name).expanduser().resolve())
+
+    checkpoint_files: dict[str, dict[str, Path]] = {}
+    for suite in SUITES:
+        checkpoint_files[suite] = {
+            "config": args.checkpoint_root / suite / "config.json",
+            "processor_config": args.checkpoint_root / suite / "processor_config.json",
+        }
     required_paths = [
         args.manifest,
         args.manifest_summary,
         args.teacher_selected,
         args.teacher_records,
         args.teacher_summary,
-        args.checkpoint_config,
-        args.processor_config,
+        *[
+            path
+            for suite_files in checkpoint_files.values()
+            for path in suite_files.values()
+        ],
     ]
     require_files(required_paths)
 
@@ -765,12 +758,38 @@ def main() -> None:
     selected_rows = load_jsonl(args.teacher_selected)
     teacher_records = load_torch(args.teacher_records)
     teacher_summary = load_json(args.teacher_summary)
-    checkpoint_config = load_json(args.checkpoint_config)
-    processor_config = load_json(args.processor_config)
+    manifest_sha256 = sha256_file(args.manifest)
 
-    manifest_by_id, manifest_horizon = validate_manifest(
+    manifest_by_id, manifest_horizon, suite_counts = validate_manifest(
         manifest_rows, args.expected_gt_count
     )
+    if manifest_summary.get("format") != MANIFEST_SUMMARY_FORMAT:
+        raise RuntimeError("Unexpected LIBERO-Plus manifest summary format")
+    if manifest_summary.get("status") != "PASS":
+        raise RuntimeError("LIBERO-Plus manifest summary is not marked PASS")
+    if teacher_summary.get("format") != TEACHER_SUMMARY_FORMAT:
+        raise RuntimeError("Unexpected teacher quality summary format")
+    if teacher_summary.get("status") != "PASS":
+        raise RuntimeError("Teacher quality summary is not marked PASS")
+
+    teacher_provenance = teacher_summary.get("provenance", {})
+    if teacher_provenance.get("manifest_format") != MANIFEST_FORMAT:
+        raise RuntimeError("Teacher summary manifest format mismatch")
+    if teacher_provenance.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("Teacher summary manifest SHA-256 mismatch")
+    if teacher_records.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("Filtered teacher records manifest SHA-256 mismatch")
+    for key in ("checkpoint_sha256", "gt_h5_sha256"):
+        if teacher_records.get(key) != teacher_provenance.get(key):
+            raise RuntimeError(f"Filtered teacher records {key} mismatch")
+
+    output_hashes = teacher_summary.get("outputs", {}).get("sha256", {})
+    if output_hashes.get("selected_jsonl") != sha256_file(args.teacher_selected):
+        raise RuntimeError("Selected teacher JSONL SHA-256 mismatch")
+    expected_records_hash = output_hashes.get("direct_records")
+    if expected_records_hash != sha256_file(args.teacher_records):
+        raise RuntimeError("Direct teacher records SHA-256 mismatch")
+
     teacher_data = validate_teacher_records(
         selected_rows=selected_rows,
         records=teacher_records,
@@ -778,24 +797,118 @@ def main() -> None:
         manifest_horizon=manifest_horizon,
         expected_count=args.expected_teacher_count,
     )
-    interface = validate_checkpoint_interface(
-        checkpoint_config=checkpoint_config,
-        processor_config=processor_config,
-        embodiment_key=args.embodiment_key,
-        teacher_horizon=int(teacher_data["teacher_horizon"]),
-        action_dim=int(teacher_data["action_dim"]),
-    )
 
-    protocol = manifest_summary.get("protocol", {})
-    if int(protocol.get("total_samples", len(manifest_rows))) != len(manifest_rows):
-        raise RuntimeError("Manifest summary total_samples does not match manifest rows")
-    if int(protocol.get("horizon", manifest_horizon)) != manifest_horizon:
-        raise RuntimeError("Manifest summary horizon does not match manifest rows")
-    selected_summary = teacher_summary.get("selected_for_distillation", {})
-    if int(selected_summary.get("count", len(selected_rows))) != len(selected_rows):
-        raise RuntimeError(
-            "Teacher summary selected_for_distillation.count does not match selected rows"
+    interfaces: dict[str, dict[str, Any]] = {}
+    for suite, suite_files in checkpoint_files.items():
+        interfaces[suite] = validate_checkpoint_interface(
+            checkpoint_config=load_json(suite_files["config"]),
+            processor_config=load_json(suite_files["processor_config"]),
+            embodiment_key=args.embodiment_key,
+            teacher_horizon=int(teacher_data["teacher_horizon"]),
+            action_dim=int(teacher_data["action_dim"]),
         )
+    interface = interfaces[SUITES[0]]
+    for suite in SUITES[1:]:
+        if interfaces[suite] != interface:
+            raise RuntimeError(
+                f"GR00T action interface differs for suite {suite}: "
+                f"{interfaces[suite]} != {interface}"
+            )
+
+    manifest_total = manifest_summary.get("selected_windows", len(manifest_rows))
+    if int(manifest_total) != len(manifest_rows):
+        raise RuntimeError(
+            "Manifest summary selected_windows="
+            f"{manifest_total} != manifest rows={len(manifest_rows)}"
+        )
+    summary_suite_counts = manifest_summary.get("suite_mapping", {}).get(
+        "window_counts", {}
+    )
+    if {str(key): int(value) for key, value in summary_suite_counts.items()} != suite_counts:
+        raise RuntimeError("Manifest summary suite window counts mismatch")
+    summary_task_counts = {
+        str(key): int(value)
+        for key, value in manifest_summary.get("suite_mapping", {})
+        .get("task_counts", {})
+        .items()
+    }
+    actual_task_counts = {
+        suite: len(
+            {
+                int(row["task_index"])
+                for row in manifest_rows
+                if row["suite"] == suite
+            }
+        )
+        for suite in SUITES
+    }
+    if summary_task_counts != actual_task_counts:
+        raise RuntimeError("Manifest summary suite task counts mismatch")
+    if (
+        args.expected_gt_count == LIBERO_PLUS_MANIFEST_COUNT
+        and any(count != 10 for count in actual_task_counts.values())
+    ):
+        raise RuntimeError(
+            f"Manifest does not contain 10 tasks per suite: {actual_task_counts}"
+        )
+
+    if int(teacher_summary.get("samples", -1)) != len(manifest_rows):
+        raise RuntimeError("Teacher summary sample count does not match manifest")
+    if teacher_summary.get("suite_counts") != suite_counts:
+        raise RuntimeError("Teacher summary suite counts do not match manifest")
+
+    selected_key = (
+        "selected_for_direct_augmentation"
+        if "selected_for_direct_augmentation" in teacher_summary
+        else "selected_for_distillation"
+    )
+    selected_summary = teacher_summary.get(selected_key, {})
+    selected_summary_count = int(selected_summary.get("count", len(selected_rows)))
+    if selected_summary_count != len(selected_rows):
+        raise RuntimeError(
+            f"Teacher summary {selected_key}.count={selected_summary_count} "
+            f"!= selected rows={len(selected_rows)}"
+        )
+
+    # ---- Quality-level filter ----
+    if args.quality_levels:
+        allowed = set(args.quality_levels)
+        pre_count = len(selected_rows)
+        keep = [
+            i for i, row in enumerate(selected_rows)
+            if str(row.get("confidence_level", row.get("teacher_quality_level", ""))) in allowed
+        ]
+        selected_rows = [selected_rows[i] for i in keep]
+        # Rebuild teacher_data list-fields to match filtered selected_rows
+        list_keys = [
+            "sample_ids",
+            "suites",
+            "gt_latent_keys",
+            "confidence_levels",
+        ]
+        tensor_keys_1d = [
+            "sample_indices", "teacher_idx_primary", "confidence_weight",
+            "relative_mse_margin", "teacher_gt_action_mse", "terminal_mse",
+            "episode_indices", "local_steps", "task_indices", "global_indices",
+        ]
+        tensor_keys_N = ["teacher_actions_lerobot", "gt_actions_lerobot"]
+        keep_tensor = torch.tensor(keep, dtype=torch.long)
+        for key in list_keys:
+            if key in teacher_data:
+                old = teacher_data[key]
+                teacher_data[key] = [old[i] for i in keep]
+        for key in tensor_keys_1d:
+            if key in teacher_data:
+                teacher_data[key] = teacher_data[key][keep_tensor]
+        for key in tensor_keys_N:
+            if key in teacher_data:
+                teacher_data[key] = teacher_data[key][keep_tensor]
+        post_count = len(selected_rows)
+        print(f"Quality filter ({sorted(allowed)}): {pre_count} -> {post_count} teachers")
+        if post_count == 0:
+            raise RuntimeError(
+                f"No teachers remain after --quality-levels {sorted(allowed)} filter"
+            )
 
     mixed_index = build_index(
         manifest_rows=manifest_rows,
@@ -819,6 +932,7 @@ def main() -> None:
 
     output_dir = args.output_dir.resolve()
     index_path = output_dir / "distillation_index.jsonl"
+    teacher_index_path = output_dir / "teacher_index.jsonl"
     teacher_path = output_dir / "teacher_records_enriched.pt"
     summary_path = output_dir / "distillation_summary.json"
 
@@ -854,6 +968,8 @@ def main() -> None:
         "teacher_records_sha256": input_hashes[str(args.teacher_records)],
         "sample_ids": teacher_data["sample_ids"],
         "sample_indices": teacher_data["sample_indices"],
+        "suites": teacher_data["suites"],
+        "gt_latent_keys": teacher_data["gt_latent_keys"],
         "episode_indices": teacher_data["episode_indices"],
         "local_steps": teacher_data["local_steps"],
         "task_indices": teacher_data["task_indices"],
@@ -885,9 +1001,15 @@ def main() -> None:
             "manifest_summary": str(args.manifest_summary.resolve()),
             "teacher_selected": str(args.teacher_selected.resolve()),
             "teacher_records": str(args.teacher_records.resolve()),
-            "teacher_summary": str(args.teacher_summary.resolve()),
-            "checkpoint_config": str(args.checkpoint_config.resolve()),
-            "processor_config": str(args.processor_config.resolve()),
+            "teacher_summary": str(args.teacher_summary),
+            "checkpoint_root": str(args.checkpoint_root),
+            "suite_checkpoint_files": {
+                suite: {
+                    name: str(path)
+                    for name, path in suite_files.items()
+                }
+                for suite, suite_files in checkpoint_files.items()
+            },
             "sha256": input_hashes,
         },
         "protocol": {
@@ -900,12 +1022,15 @@ def main() -> None:
             "gt_fraction": gt_count / total_count,
             "tasks": task_count,
             "episodes": episode_count,
+            "suite_counts": suite_counts,
             "confidence_counts": dict(sorted(confidence_counts.items())),
         },
         "gr00t_interface": interface,
+        "gr00t_interfaces_by_suite": interfaces,
         "wrapper_contract": wrapper_contract,
         "outputs": {
             "distillation_index": str(index_path),
+            "teacher_index": str(teacher_index_path),
             "teacher_records_enriched": str(teacher_path),
             "distillation_summary": str(summary_path),
         },
@@ -922,16 +1047,35 @@ def main() -> None:
     print("model action horizon      :", interface["model_action_horizon"])
     print("mix order                 :", args.mix_order)
 
+    # Always extract a teacher-only index for weighted-mixing configs
+    teacher_only_rows = [row for row in mixed_index if row["source"] == "teacher"]
+
     if args.dry_run:
+        print("teacher-only index rows   :", len(teacher_only_rows))
         print("status                    : PASS (dry-run; no files written)")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        summary_path,
+        {
+            "format": SUMMARY_FORMAT_VERSION,
+            "status": "BUILDING",
+            "manifest_sha256": input_hashes[str(args.manifest)],
+        },
+    )
     atomic_write_jsonl(index_path, mixed_index)
+    atomic_write_jsonl(teacher_index_path, teacher_only_rows)
     atomic_torch_save(teacher_path, enriched_teacher_records)
+    summary["outputs"]["sha256"] = {
+        "distillation_index": sha256_file(index_path),
+        "teacher_index": sha256_file(teacher_index_path),
+        "teacher_records_enriched": sha256_file(teacher_path),
+    }
     atomic_write_json(summary_path, summary)
 
     print("distillation index        :", index_path)
+    print("teacher-only index        :", teacher_index_path)
     print("enriched teacher records  :", teacher_path)
     print("summary                   :", summary_path)
     print("status                    : PASS")
