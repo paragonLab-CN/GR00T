@@ -118,6 +118,8 @@ def main() -> None:
     parser.add_argument("baseline_summary", type=Path)
     parser.add_argument("candidate_summary", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--baseline-label", default="Baseline")
+    parser.add_argument("--candidate-label", default="Image aug")
     args = parser.parse_args()
 
     baseline = json.loads(args.baseline_summary.read_text(encoding="utf-8"))
@@ -143,6 +145,10 @@ def main() -> None:
 
     comparison = {
         "comparison_mode": "paired_fixed_diffusion_noise",
+        "model_labels": {
+            "baseline": args.baseline_label,
+            "candidate": args.candidate_label,
+        },
         "protocol": {
             "tasks": 112,
             "episodes_per_task": 10,
@@ -187,11 +193,13 @@ def main() -> None:
     change = comparison["percentage_point_change"]["overall"]
     print("========== Paired fixed-noise comparison ==========")
     print(
-        f"Baseline : {base_overall['successes']}/{base_overall['episodes']} "
+        f"{args.baseline_label}: "
+        f"{base_overall['successes']}/{base_overall['episodes']} "
         f"= {base_overall['success_rate']:.2%}"
     )
     print(
-        f"Image aug: {new_overall['successes']}/{new_overall['episodes']} "
+        f"{args.candidate_label}: "
+        f"{new_overall['successes']}/{new_overall['episodes']} "
         f"= {new_overall['success_rate']:.2%} ({change:+.2f} pp)"
     )
     print(f"Saved: {output}")

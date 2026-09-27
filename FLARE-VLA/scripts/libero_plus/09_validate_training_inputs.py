@@ -412,13 +412,13 @@ def main() -> None:
         raise ValueError("teacher_mix_ratio must be finite and lie in (0, 1)")
     if args.num_gpus != 1 or args.global_batch_size != 64:
         raise ValueError(
-            "Strict 54:10 replay requires num_gpus=1 and global_batch_size=64"
+            "Fixed-ratio replay requires num_gpus=1 and global_batch_size=64"
         )
     if (
-        args.fixed_gt_samples_per_batch != 54
-        or args.fixed_teacher_samples_per_batch != 10
+        args.fixed_gt_samples_per_batch <= 0
+        or args.fixed_teacher_samples_per_batch <= 0
     ):
-        raise ValueError("Strict GT replay requires fixed batch counts 54/10")
+        raise ValueError("Fixed GT and teacher sample counts must both be positive")
     if args.gradient_accumulation_steps < 1:
         raise ValueError("gradient_accumulation_steps must be positive")
     fixed_batch_size = (

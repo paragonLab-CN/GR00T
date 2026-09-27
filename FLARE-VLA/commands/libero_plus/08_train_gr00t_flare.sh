@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Train GR00T with strict 54:10 GT replay on corrected four-suite teachers.
+# Train GR00T with fixed-ratio GT replay on corrected four-suite teachers.
 #
-# Every per-device micro-batch contains exactly 54 full-GT samples and 10
-# teacher samples. TEACHER_MIX_RATIO mirrors the fixed teacher sample fraction
-# (10 / 64 = 0.15625); the fixed counts, not this ratio, control sampling.
+# Every per-device micro-batch contains the configured fixed number of full-GT
+# and teacher samples. TEACHER_MIX_RATIO must mirror the fixed teacher sample
+# fraction; the fixed counts, not this ratio, control sampling. Defaults retain
+# the original 54:10 experiment contract.
 #
 # RESUME_MODE=auto resumes an existing complete checkpoint and starts fresh only
 # when the run directory does not exist. New checkpoints retain optimizer,
@@ -80,16 +81,12 @@ for integer_var in NUM_GPUS MAX_STEPS SAVE_STEPS SAVE_TOTAL_LIMIT GLOBAL_BATCH_S
   fi
 done
 if [[ "${NUM_GPUS}" -ne 1 || "${GLOBAL_BATCH_SIZE}" -ne 64 ]]; then
-  echo "ERROR: strict 54:10 replay requires NUM_GPUS=1 and GLOBAL_BATCH_SIZE=64" >&2
+  echo "ERROR: fixed-ratio replay requires NUM_GPUS=1 and GLOBAL_BATCH_SIZE=64" >&2
   exit 1
 fi
-if [[ "${FIXED_GT_SAMPLES_PER_BATCH}" -ne 54 || \
-      "${FIXED_TEACHER_SAMPLES_PER_BATCH}" -ne 10 ]]; then
-  echo "ERROR: this launcher requires fixed GT/teacher counts 54/10" >&2
-  exit 1
-fi
-if (( FIXED_GT_SAMPLES_PER_BATCH + FIXED_TEACHER_SAMPLES_PER_BATCH != 64 )); then
-  echo "ERROR: fixed GT and teacher counts must sum to 64" >&2
+if (( FIXED_GT_SAMPLES_PER_BATCH + FIXED_TEACHER_SAMPLES_PER_BATCH \
+      != GLOBAL_BATCH_SIZE )); then
+  echo "ERROR: fixed GT and teacher counts must sum to GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE}" >&2
   exit 1
 fi
 
@@ -271,11 +268,17 @@ if [[ "${RUN_MODE}" == "validate" ]]; then
   exit 0
 fi
 if [[ "${RESUME_KIND}" == "full" ]]; then
-  echo "Resuming corrected four-suite 54:10 GT replay with full state."
+  echo "Resuming corrected four-suite "\
+"${FIXED_GT_SAMPLES_PER_BATCH}:${FIXED_TEACHER_SAMPLES_PER_BATCH} "\
+"GT replay with full state."
 elif [[ "${RESUME_KIND}" == "weights-only" ]]; then
-  echo "Recovering corrected four-suite 54:10 GT replay from model weights."
+  echo "Recovering corrected four-suite "\
+"${FIXED_GT_SAMPLES_PER_BATCH}:${FIXED_TEACHER_SAMPLES_PER_BATCH} "\
+"GT replay from model weights."
 else
-  echo "Starting new corrected four-suite 54:10 GT-replay training."
+  echo "Starting new corrected four-suite "\
+"${FIXED_GT_SAMPLES_PER_BATCH}:${FIXED_TEACHER_SAMPLES_PER_BATCH} "\
+"GT-replay training."
 fi
 echo "Run directory: ${RUN_DIR}"
 bash examples/finetune.sh "${COMMON_ARGS[@]}" -- \

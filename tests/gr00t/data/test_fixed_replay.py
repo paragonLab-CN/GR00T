@@ -7,7 +7,7 @@ from gr00t.experiment.trainer import FixedSourceCountCollator
 import pytest
 
 
-def _fixed_config(tmp_path: Path):
+def _fixed_config(tmp_path: Path, gt_count: int = 54, teacher_count: int = 10):
     index_path = tmp_path / "distillation_index.jsonl"
     teacher_path = tmp_path / "teacher_records.pt"
     index_path.write_text("{}\n", encoding="utf-8")
@@ -16,8 +16,8 @@ def _fixed_config(tmp_path: Path):
     config = get_default_config()
     config.training.global_batch_size = 64
     config.training.num_gpus = 1
-    config.data.fixed_gt_samples_per_batch = 54
-    config.data.fixed_teacher_samples_per_batch = 10
+    config.data.fixed_gt_samples_per_batch = gt_count
+    config.data.fixed_teacher_samples_per_batch = teacher_count
     config.data.datasets = [
         SingleDatasetConfig(
             dataset_paths=["/fake/libero"],
@@ -41,6 +41,10 @@ def test_fixed_replay_config_accepts_54_10(tmp_path):
     _fixed_config(tmp_path).validate()
 
 
+def test_fixed_replay_config_accepts_44_20(tmp_path):
+    _fixed_config(tmp_path, gt_count=44, teacher_count=20).validate()
+
+
 def test_fixed_replay_config_rejects_wrong_total(tmp_path):
     config = _fixed_config(tmp_path)
     config.data.fixed_gt_samples_per_batch = 53
@@ -62,18 +66,23 @@ def test_fixed_replay_config_requires_both_counts(tmp_path):
         config.validate()
 
 
-def test_fixed_source_collator_strips_internal_marker():
+@pytest.mark.parametrize(("gt_count", "teacher_count"), [(54, 10), (44, 20)])
+def test_fixed_source_collator_strips_internal_marker(gt_count, teacher_count):
     received = []
 
     def collator(features):
         received.extend(features)
         return {"payload": [feature["payload"] for feature in features]}
 
-    wrapper = FixedSourceCountCollator(collator, {"gt": 54, "teacher": 10})
+    wrapper = FixedSourceCountCollator(
+        collator,
+        {"gt": gt_count, "teacher": teacher_count},
+    )
     features = [
-        {FIXED_BATCH_SOURCE_KEY: "gt", "payload": index} for index in range(54)
+        {FIXED_BATCH_SOURCE_KEY: "gt", "payload": index} for index in range(gt_count)
     ] + [
-        {FIXED_BATCH_SOURCE_KEY: "teacher", "payload": index} for index in range(10)
+        {FIXED_BATCH_SOURCE_KEY: "teacher", "payload": index}
+        for index in range(teacher_count)
     ]
     result = wrapper(features)
 

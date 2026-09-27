@@ -256,7 +256,7 @@ class TestFixedRatioShardedMixtureDataset:
     """Strict replay composition must hold at every worker-local batch boundary."""
 
     @staticmethod
-    def _make_fixed(seed=42):
+    def _make_fixed(seed=42, source_counts=(54, 10)):
         datasets = [
             MockShardedDataset("/fake/gt", num_shards=8, shard_length=128),
             MockShardedDataset("/fake/teacher", num_shards=8, shard_length=128),
@@ -267,15 +267,16 @@ class TestFixedRatioShardedMixtureDataset:
             return FixedRatioShardedMixtureDataset(
                 datasets=datasets,
                 source_labels=["gt", "teacher"],
-                source_counts=[54, 10],
+                source_counts=list(source_counts),
                 processor=processor,
                 seed=seed,
                 num_shards_per_epoch=64,
             )
 
     @pytest.mark.parametrize("num_workers", [0, 2])
-    def test_100_batches_are_exact_54_to_10(self, num_workers):
-        dataset = self._make_fixed()
+    @pytest.mark.parametrize("source_counts", [(54, 10), (44, 20)])
+    def test_100_batches_have_exact_source_counts(self, num_workers, source_counts):
+        dataset = self._make_fixed(source_counts=source_counts)
         loader_kwargs = {
             "batch_size": 64,
             "num_workers": num_workers,
@@ -286,7 +287,10 @@ class TestFixedRatioShardedMixtureDataset:
 
         for batch_index, batch in enumerate(loader):
             counts = Counter(batch[FIXED_BATCH_SOURCE_KEY])
-            assert counts == {"gt": 54, "teacher": 10}
+            assert counts == {
+                "gt": source_counts[0],
+                "teacher": source_counts[1],
+            }
             assert len(batch["dummy"]) == 64
             if batch_index == 99:
                 break

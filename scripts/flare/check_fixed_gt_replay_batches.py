@@ -96,10 +96,8 @@ def main() -> None:
         "gt": args.fixed_gt_samples_per_batch,
         "teacher": args.fixed_teacher_samples_per_batch,
     }
-    if expected_counts != {"gt": 54, "teacher": 10}:
-        raise ValueError(
-            "This LIBERO-Plus GT-replay preflight requires fixed counts 54/10"
-        )
+    if any(count <= 0 for count in expected_counts.values()):
+        raise ValueError("Fixed GT and teacher sample counts must both be positive")
     for name in ("num_batches", "shard_size", "num_shards_per_epoch"):
         if getattr(args, name) < 1:
             raise ValueError(f"{name} must be positive")

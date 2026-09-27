@@ -130,9 +130,13 @@ def main() -> None:
             raise RuntimeError(
                 f"Embedded fixed replay counts mismatch: {actual_counts} != {expected_counts}"
             )
-        if training_config["global_batch_size"] != sum(expected_counts.values()):
+        global_batch_size = int(training_config["global_batch_size"])
+        if global_batch_size != sum(expected_counts.values()):
             raise RuntimeError("Embedded global batch size does not match fixed counts")
-        if training_config["gradient_accumulation_steps"] != 10:
+        gradient_accumulation_steps = int(
+            training_config["gradient_accumulation_steps"]
+        )
+        if gradient_accumulation_steps != 10:
             raise RuntimeError("Expected gradient accumulation 10")
         dataset_types = [
             dataset["dataset_type"] for dataset in data_config["datasets"]
@@ -165,7 +169,11 @@ def main() -> None:
             "[PASS] embedded fixed replay config: "
             f"GT={args.fixed_gt_samples_per_batch}, "
             f"teacher={args.fixed_teacher_samples_per_batch}, "
-            "batch=64, accumulation=10 (540 GT + 100 teacher/update)"
+            f"batch={global_batch_size}, "
+            f"accumulation={gradient_accumulation_steps} "
+            f"({args.fixed_gt_samples_per_batch * gradient_accumulation_steps} GT + "
+            f"{args.fixed_teacher_samples_per_batch * gradient_accumulation_steps} "
+            "teacher/update)"
         )
     print(f"Valid image-augmentation checkpoint: {args.checkpoint.resolve()}")
 
