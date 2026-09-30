@@ -18,7 +18,7 @@ export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES=0
 
 readonly LEWM_ROOT="/root/autodl-tmp/le-wm"
-readonly FLARE_ROOT="/root/autodl-tmp/FLARE-VLA"
+readonly FLARE_ROOT="/root/autodl-tmp/Isaac-GR00T/FLARE-VLA"
 readonly LEWM_CHECKPOINT="${LEWM_ROOT}/stablewm_data/checkpoints/libero_plus_lewm_full/weights_epoch_50.pt"
 readonly GT_LATENT_OUTPUT="${FLARE_ROOT}/outputs/libero_plus/gt_latents/libero_plus_epoch50_fixed_h8_framebank_trainpipe.h5"
 
