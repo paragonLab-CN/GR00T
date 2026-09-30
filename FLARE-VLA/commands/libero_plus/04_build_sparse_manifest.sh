@@ -29,7 +29,7 @@ readonly FLARE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 readonly ISAAC_ROOT="$(cd -- "${FLARE_ROOT}/.." && pwd)"
 readonly PYTHON_BIN="/root/autodl-tmp/envs/LeWorldModel/bin/python3"
 readonly DATASET_ROOT="${ISAAC_ROOT}/examples/LIBERO/libero_plus_lerobot"
-readonly GT_H5="${FLARE_ROOT}/outputs/libero_plus/gt_latents/libero_plus_epoch50_fixed_h8_framebank_trainpipe.h5"
+readonly GT_H5="${FLARE_ROOT}/outputs/libero_plus/gt_latents/libero_plus_epoch50_h8_framebank_trainpipe.h5"
 readonly MANIFEST_DIR="${FLARE_ROOT}/outputs/libero_plus/manifests_epoch50_fixed"
 readonly MANIFEST="${MANIFEST_DIR}/libero_plus_sparse_manifest.jsonl"
 readonly PER_SUITE_DIR="${MANIFEST_DIR}/per_suite"
@@ -45,7 +45,7 @@ if [[ ! -d "${DATASET_ROOT}" ]]; then
 fi
 if [[ ! -f "${GT_H5}" ]]; then
   echo "ERROR: GT latent H5 is missing: ${GT_H5}" >&2
-  echo "Run commands/libero_plus/03_extract_gt_latent.sh first (with epoch-50 checkpoint)." >&2
+  echo "The epoch-50 GT latent should already exist from the previous run." >&2
   exit 1
 fi
 if [[ ! -d "${BDDL_ROOT}" ]]; then
