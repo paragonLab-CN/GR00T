@@ -45,6 +45,10 @@ def test_fixed_replay_config_accepts_44_20(tmp_path):
     _fixed_config(tmp_path, gt_count=44, teacher_count=20).validate()
 
 
+def test_fixed_replay_config_accepts_34_30(tmp_path):
+    _fixed_config(tmp_path, gt_count=34, teacher_count=30).validate()
+
+
 def test_fixed_replay_config_rejects_wrong_total(tmp_path):
     config = _fixed_config(tmp_path)
     config.data.fixed_gt_samples_per_batch = 53
@@ -66,7 +70,10 @@ def test_fixed_replay_config_requires_both_counts(tmp_path):
         config.validate()
 
 
-@pytest.mark.parametrize(("gt_count", "teacher_count"), [(54, 10), (44, 20)])
+@pytest.mark.parametrize(
+    ("gt_count", "teacher_count"),
+    [(54, 10), (44, 20), (34, 30)],
+)
 def test_fixed_source_collator_strips_internal_marker(gt_count, teacher_count):
     received = []
 

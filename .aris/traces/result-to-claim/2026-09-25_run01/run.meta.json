@@ -1,0 +1,17 @@
+{
+  "skill": "result-to-claim",
+  "run_id": "2026-09-25_run01",
+  "started_at": "2026-09-25T04:55:44Z",
+  "executor": "claude-code",
+  "executor_model": null,
+  "executor_model_source": "unavailable",
+  "executor_family": "unknown",
+  "reviewer_model_source": "requested",
+  "reviewer_family": "unknown",
+  "reviewer_backend": "none-configured",
+  "native_evidence_id": null,
+  "native_evidence_path": null,
+  "family_relation": "unknown",
+  "independence_verified": "unverified",
+  "project_dir": "/root/autodl-tmp/Isaac-GR00T"
+}

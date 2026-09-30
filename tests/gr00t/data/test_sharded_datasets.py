@@ -274,7 +274,7 @@ class TestFixedRatioShardedMixtureDataset:
             )
 
     @pytest.mark.parametrize("num_workers", [0, 2])
-    @pytest.mark.parametrize("source_counts", [(54, 10), (44, 20)])
+    @pytest.mark.parametrize("source_counts", [(54, 10), (44, 20), (34, 30)])
     def test_100_batches_have_exact_source_counts(self, num_workers, source_counts):
         dataset = self._make_fixed(source_counts=source_counts)
         loader_kwargs = {

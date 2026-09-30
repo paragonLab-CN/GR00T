@@ -1,0 +1,73 @@
+[
+ {
+  "id": "C1_pass_rate_deployed",
+  "value": "0.6517",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_audit.log"
+ },
+ {
+  "id": "C1_oracle_better_both_deployed",
+  "value": "0.4439",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_quality_audit.parquet",
+  "verification": "recomputed-from-parquet"
+ },
+ {
+  "id": "C1_oracle_mse_deployed",
+  "value": "0.01127",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_quality_audit.parquet",
+  "verification": "recomputed-from-parquet"
+ },
+ {
+  "id": "C1_best_mse_deployed",
+  "value": "0.01155",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_quality_audit.parquet",
+  "verification": "recomputed-from-parquet"
+ },
+ {
+  "id": "C1_agreement_deployed",
+  "value": "0.9435",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_quality_audit.parquet",
+  "verification": "recomputed-from-parquet"
+ },
+ {
+  "id": "C4_selected_deployed",
+  "value": "317941",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_audit.log"
+ },
+ {
+  "id": "C4_beneficial_P90_pct",
+  "value": "1.88",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_quality_audit.parquet",
+  "verification": "recomputed-from-parquet"
+ },
+ {
+  "id": "C4_redundant_among_selected_pct",
+  "value": "35.4",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/teacher_quality_audit.parquet",
+  "verification": "recomputed-from-parquet"
+ },
+ {
+  "id": "C2_diversity_oraclegap_corr",
+  "value": "0.0555",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/c2_c3_analysis.json"
+ },
+ {
+  "id": "C3_train_tasks_with_downstream",
+  "value": "35",
+  "source": "FLARE-VLA/outputs/libero_plus/teacher_scoring_v2/c2_c3_analysis.json"
+ },
+ {
+  "id": "D1_gt_only_rate",
+  "value": "0.7964285714285714",
+  "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_54_10_checkpoint_10000_fixed_noise_seed2026/four_model_comparison.json"
+ },
+ {
+  "id": "D1_flare_rate",
+  "value": "0.7544642857142857",
+  "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_54_10_checkpoint_10000_fixed_noise_seed2026/four_model_comparison.json"
+ },
+ {
+  "id": "D2_gt_replay_44_20",
+  "value": "0.8125",
+  "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_44_20_checkpoint_10000_fixed_noise_seed2026/gt_replay_44_20_vs_54_10_comparison.json"
+ }
+]

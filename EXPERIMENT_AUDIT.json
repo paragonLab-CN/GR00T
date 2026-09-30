@@ -1,0 +1,101 @@
+{
+  "date": "2026-09-23",
+  "auditor": "executor-side-claude (cross-model reviewer backend UNAVAILABLE — not a cross-model verdict)",
+  "overall_verdict": "warn",
+  "integrity_status": "pass",
+  "design_status": "warn",
+  "checks": {
+    "gt_provenance": {"status": "pass", "details": "success_rate from real LIBERO sim (libero_env.py check_success); teacher latent GT from real demo latent framebank; teacher itself labeled as proxy"},
+    "score_normalization": {"status": "pass", "details": "binary success count ratio; no self-normalization found"},
+    "result_existence": {"status": "pass", "details": "all referenced summary/comparison JSONs exist and numbers reconcile (e.g. 845/1120=0.7545)"},
+    "dead_code": {"status": "warn", "details": "many one-off check_*/inspect_*/summarize_* scripts in scripts/flare"},
+    "scope": {"status": "pass", "details": "112 tasks x 10 episodes x 4 models, fixed diffusion noise seed 2026, paired, per-suite/category/difficulty breakdown"},
+    "eval_type": "real_gt"
+  },
+  "design_findings": {
+    "root_cause": "teacher is systematically worse than GT oracle",
+    "oracle_better_than_all_candidates_both_rate": 0.6103,
+    "oracle_better_than_all_candidates_mse_rate": 0.6366,
+    "best_candidate_latent_mse_mean": 0.01386,
+    "oracle_latent_mse_mean": 0.00415,
+    "teacher_selection_rate": 0.5338,
+    "teacher_high_quality_fraction_of_selected": 0.1016,
+    "teacher_gt_action_mse_max_selected": 0.1955
+  },
+  "fixed_noise_ckpt10000_comparison": {
+    "gt_only": 0.7964,
+    "flare_epoch50_mix012": 0.7545,
+    "flare_image_aug": 0.7661,
+    "flare_gt_replay_54_10_suite_corrected": 0.8063
+  },
+  "claims": [
+    {"id": "C1", "claim": "FLARE beats GT-only", "impact": "unsupported (main recipe -4.2pt; only 54:10+aug variant +1.0pt)"},
+    {"id": "C2", "claim": "LeWM selects trajectories better than GT", "impact": "unsupported (61% oracle beats all candidates)"},
+    {"id": "C3", "claim": "evaluation protocol is reliable", "impact": "supported"}
+  ],
+  "scoring_checkpoint_question": {
+    "question": "use LeWM epoch-9 vs epoch-50 vs epoch-100 for teacher scoring?",
+    "recommendation": "use epoch-50; do NOT train epoch-100",
+    "review_status": "REVIEW_UNAVAILABLE (no cross-model MCP backend configured)",
+    "evidence_full_scoring": {
+      "n_samples_epoch9": 487880,
+      "n_samples_epoch50": 489632,
+      "oracle_mse_mean_epoch9": 0.01127,
+      "oracle_mse_mean_epoch50": 0.00415,
+      "oracle_better_both_rate_epoch9": 0.444,
+      "oracle_better_both_rate_epoch50": 0.610,
+      "note": "same K=4 candidate set; only the LeWM checkpoint differs. epoch-50 separates GT from candidates much more cleanly."
+    },
+    "evidence_checkpoint_sweep": {
+      "subset_samples": 5000,
+      "subset_selection": "first-N (all_rows[:5000], not random) — biased, treat as directional only",
+      "oracle_mse_mean_epoch20": 0.00631,
+      "oracle_mse_mean_epoch30": 0.00493,
+      "oracle_mse_mean_epoch50": 0.00417,
+      "trend": "monotonic improvement with training"
+    },
+    "why_not_epoch100": [
+      "diminishing returns (20->30 -22%, 30->50 -15%)",
+      "epoch-50 last/first-step oracle_mse ratio already 31x (vs 21.7x at epoch-20); more training risks long-horizon scoring instability",
+      "high cost (~75min/epoch x 50 + re-extract latents ~2h/epoch + full rescore)",
+      "real bottleneck is 61% oracle-better-than-all-candidates, not scorer precision"
+    ],
+    "downstream_status": "epoch-50 GR00T model interrupted at 5031/10000 steps (KeyboardInterrupt), no eval — downstream benefit NOT yet verified",
+    "action_items": [
+      "switch hardcoded weights_epoch_9.pt defaults to epoch-50 in 03_extract_gt_latent / 05_score scripts",
+      "finish epoch-50 downstream training + eval before investing more",
+      "use seeded random subset (not first-N) for future checkpoint sweeps"
+    ]
+  },
+  "design_review_teacher_vs_gt": {
+    "date": "2026-09-24",
+    "question": "how to make teacher rival GT and beat GR00T baseline?",
+    "review_status": "REVIEW_UNAVAILABLE (no cross-model MCP backend configured)",
+    "fixed_noise_ckpt10000_rerun": {
+      "protocol": "112 tasks x 10 episodes, paired, diffusion noise seed 2026",
+      "gt_only": 0.7964,
+      "gt_replay_54_10": 0.7812,
+      "image_aug": 0.7661,
+      "flare_mix012": 0.7545,
+      "note": "gt_only (= GR00T baseline) is best; all FLARE variants below baseline. Earlier 0.8063 figure is from a stale dir; this rerun supersedes it."
+    },
+    "root_causes_ranked": [
+      "teacher = same-capability model's OPEN-LOOP sample (denoising_steps=4, K=4 independent noise, horizon=8) => ceiling below GT; oracle beats all candidates in 61% windows, best-candidate MSE 3.3x worse than GT",
+      "horizon mismatch: teacher 8-step vs processor 16-step (allow-padding), plus action-space divergence (mse_max~0.196)",
+      "LeWM only RANKS candidates, cannot IMPROVE them; when all K<GT (61%) the pick is still sub-GT"
+    ],
+    "levers_ranked": [
+      "closed-loop / replan teacher via LeWM MPC + sim check_success filter (only path to teacher > GT)",
+      "hard-gate distillation to windows where candidate_mse < oracle_mse (~39%), so teacher = incremental info not noise",
+      "use LeWM as planner on GT latents to generate better-than-demo actions (coach not judge)",
+      "raise GT:teacher ratio toward 90%+ (gt_replay already better than mix0.12)",
+      "align teacher horizon to 16 steps or tighten loss mask",
+      "2x2 ablation: {teacher on/off} x {aug on/off} to attribute gains"
+    ],
+    "claims": [
+      {"claim": "FLARE can beat GR00T baseline", "impact": "currently_unsupported (all variants below gt_only)"},
+      {"claim": "teacher quality can rival GT", "impact": "currently_unsupported; needs closed-loop/replan or per-window gating"},
+      {"claim": "evaluation protocol reliable", "impact": "supported"}
+    ]
+  }
+}
