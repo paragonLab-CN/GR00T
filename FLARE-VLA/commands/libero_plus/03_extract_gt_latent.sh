@@ -30,7 +30,7 @@ echo "  Horizon: 8"
 echo "============================================"
 
 /root/autodl-tmp/envs/LeWorldModel/bin/python -u \
-  /root/autodl-tmp/FLARE-VLA/scripts/libero_plus/03_extract_gt_latent_libero_plus.py \
+  /root/autodl-tmp/Isaac-GR00T/FLARE-VLA/scripts/libero_plus/03_extract_gt_latent_libero_plus.py \
   --checkpoint-path "${LEWM_CHECKPOINT}" \
   --output-path "${GT_LATENT_OUTPUT}"
 
