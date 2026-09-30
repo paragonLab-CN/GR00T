@@ -13,19 +13,19 @@ set -euo pipefail
 
 REPO_ROOT=/root/autodl-tmp/FLARE-VLA
 
-MANIFEST="${REPO_ROOT}/outputs/libero_plus/manifests/spatial_sparse_manifest.jsonl"
-MANIFEST_SUMMARY="${REPO_ROOT}/outputs/libero_plus/manifests/spatial_sparse_manifest_summary.json"
-TEACHER_SELECTED="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_v2/teacher_quality_selected.jsonl"
-TEACHER_RECORDS="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_v2/teacher_quality_direct_records.pt"
-TEACHER_SUMMARY="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_v2/teacher_quality_summary.json"
+MANIFEST="${REPO_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl"
+MANIFEST_SUMMARY="${REPO_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest_summary.json"
+TEACHER_SELECTED="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_fixed_v2/teacher_quality_selected.jsonl"
+TEACHER_RECORDS="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_fixed_v2/teacher_quality_direct_records.pt"
+TEACHER_SUMMARY="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_fixed_v2/teacher_quality_summary.json"
 CHECKPOINT_CONFIG="/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/libero_spatial/config.json"
 PROCESSOR_CONFIG="/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/libero_spatial/processor_config.json"
-OUTPUT_DIR="${REPO_ROOT}/outputs/libero_plus/distillation_dataset_epoch50"
+OUTPUT_DIR="${REPO_ROOT}/outputs/libero_plus/distillation_dataset_epoch50_fixed"
 
 EXPECTED_GT_COUNT="${EXPECTED_GT_COUNT:-489632}"
 
 echo "=============================================="
-echo "Building epoch-50 distillation dataset index"
+echo "Building epoch-50 distillation dataset index (fixed manifest)"
 echo "=============================================="
 echo "Teacher records: ${TEACHER_RECORDS}"
 echo "Output dir:      ${OUTPUT_DIR}"

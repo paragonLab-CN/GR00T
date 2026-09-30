@@ -7,13 +7,13 @@
 # scoring.
 #
 # Inputs:
-#   FLARE-VLA/outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl
-#   FLARE-VLA/outputs/libero_plus/manifests/per_suite/manifest_<suite>.jsonl
+#   FLARE-VLA/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl
+#   FLARE-VLA/outputs/libero_plus/manifests_epoch50_fixed/per_suite/manifest_<suite>.jsonl
 #
 # Outputs:
-#   outputs/libero_plus/sparse_candidates/<suite>/candidates/
-#   outputs/libero_plus/sparse_candidates/candidates/
-#   outputs/libero_plus/sparse_candidates/candidate_generation_summary.json
+#   outputs/libero_plus/sparse_candidates_epoch50_fixed/<suite>/candidates/
+#   outputs/libero_plus/sparse_candidates_epoch50_fixed/candidates/
+#   outputs/libero_plus/sparse_candidates_epoch50_fixed/candidate_generation_summary.json
 #
 # Current manifest scale: 487,880 windows x 4 candidates.
 #
@@ -31,9 +31,9 @@ readonly ISAAC_ROOT="$(cd -- "${FLARE_ROOT}/.." && pwd)"
 readonly DATASET="${ISAAC_ROOT}/examples/LIBERO/libero_plus_lerobot"
 readonly CHECKPOINT_ROOT="${ISAAC_ROOT}/checkpoints/GR00T-N1.7-LIBERO"
 readonly BACKBONE_MODEL="${ISAAC_ROOT}/checkpoints/Cosmos-Reason2-2B"
-readonly MANIFEST_DIR="${FLARE_ROOT}/outputs/libero_plus/manifests/per_suite"
-readonly FULL_MANIFEST="${FLARE_ROOT}/outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl"
-readonly OUTPUT_ROOT="${ISAAC_ROOT}/outputs/libero_plus/sparse_candidates"
+readonly MANIFEST_DIR="${FLARE_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/per_suite"
+readonly FULL_MANIFEST="${FLARE_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl"
+readonly OUTPUT_ROOT="${ISAAC_ROOT}/outputs/libero_plus/sparse_candidates_epoch50_fixed"
 readonly GENERATOR="${ISAAC_ROOT}/scripts/flare/04_generate_validation_candidates.py"
 readonly MERGER="${FLARE_ROOT}/scripts/libero_plus/04_merge_candidate_summaries.py"
 readonly MANIFEST_FORMAT="libero_plus_per_suite_manifest_v2"

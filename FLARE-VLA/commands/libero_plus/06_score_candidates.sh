@@ -2,13 +2,13 @@
 # Score the merged K=4 LIBERO-Plus GR00T candidates with LeWM.
 #
 # Inputs:
-#   FLARE-VLA/outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl
-#   outputs/libero_plus/sparse_candidates/candidates/
-#   outputs/libero_plus/sparse_candidates/candidate_generation_summary.json
-#   FLARE-VLA/outputs/libero_plus/gt_latents/libero_plus_epoch9_h8_framebank_trainpipe.h5
+#   FLARE-VLA/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl
+#   outputs/libero_plus/sparse_candidates_epoch50_fixed/candidates/
+#   outputs/libero_plus/sparse_candidates_epoch50_fixed/candidate_generation_summary.json
+#   FLARE-VLA/outputs/libero_plus/gt_latents/libero_plus_epoch50_fixed_h8_framebank_trainpipe.h5
 #
 # Output:
-#   FLARE-VLA/outputs/libero_plus/teacher_scoring/
+#   FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_fixed/
 #
 # Usage:
 #   bash FLARE-VLA/commands/libero_plus/06_score_candidates.sh
@@ -26,14 +26,14 @@ readonly WORKSPACE_ROOT="$(cd -- "${ISAAC_ROOT}/.." && pwd)"
 readonly LEWM_ROOT="${LEWM_ROOT:-${WORKSPACE_ROOT}/le-wm}"
 readonly LEWM_PYTHON="${LEWM_PYTHON:-${WORKSPACE_ROOT}/envs/LeWorldModel/bin/python}"
 readonly SCORER="${FLARE_ROOT}/scripts/libero_plus/05_score_libero_plus.py"
-readonly MANIFEST="${MANIFEST:-${FLARE_ROOT}/outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl}"
-readonly CANDIDATE_ROOT="${CANDIDATE_ROOT:-${ISAAC_ROOT}/outputs/libero_plus/sparse_candidates}"
+readonly MANIFEST="${MANIFEST:-${FLARE_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl}"
+readonly CANDIDATE_ROOT="${CANDIDATE_ROOT:-${ISAAC_ROOT}/outputs/libero_plus/sparse_candidates_epoch50_fixed}"
 readonly CANDIDATE_DIR="${CANDIDATE_DIR:-${CANDIDATE_ROOT}/candidates}"
 readonly CANDIDATE_SUMMARY="${CANDIDATE_SUMMARY:-${CANDIDATE_ROOT}/candidate_generation_summary.json}"
-readonly GT_H5="${GT_H5:-${FLARE_ROOT}/outputs/libero_plus/gt_latents/libero_plus_epoch9_h8_framebank_trainpipe.h5}"
-readonly CHECKPOINT="${CHECKPOINT:-${LEWM_ROOT}/stablewm_data/checkpoints/libero_plus_lewm_full/weights_epoch_9.pt}"
-readonly OUTPUT_DIR="${OUTPUT_DIR:-${FLARE_ROOT}/outputs/libero_plus/teacher_scoring}"
-readonly EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-ceb52c6b525ca34b5bbdc395e20f6e2b0663bb9d86995e9c00a7ae443ba1d3da}"
+readonly GT_H5="${GT_H5:-${FLARE_ROOT}/outputs/libero_plus/gt_latents/libero_plus_epoch50_fixed_h8_framebank_trainpipe.h5}"
+readonly CHECKPOINT="${CHECKPOINT:-${LEWM_ROOT}/stablewm_data/checkpoints/libero_plus_lewm_full/weights_epoch_50.pt}"
+readonly OUTPUT_DIR="${OUTPUT_DIR:-${FLARE_ROOT}/outputs/libero_plus/teacher_scoring_epoch50_fixed}"
+readonly EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-381bc4725e71a5728d172d84e6c706cffa7dc0f01220af1ac0dcfd440dbc5825}"
 readonly BATCH_SIZE="${BATCH_SIZE:-32}"
 readonly DEVICE="${DEVICE:-cuda}"
 readonly MAX_SAMPLES="${MAX_SAMPLES:-}"

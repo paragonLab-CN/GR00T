@@ -13,9 +13,9 @@ set -euo pipefail
 GR00T_ROOT="${GR00T_ROOT:-/root/autodl-tmp/Isaac-GR00T}"
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-${GR00T_ROOT}/checkpoints/GR00T-N1.7-3B}"
 DATASET_PATH="${DATASET_PATH:-/root/autodl-tmp/Isaac-GR00T/examples/LIBERO/libero_plus_lerobot}"
-DISTILLATION_DATASET_DIR="${DISTILLATION_DATASET_DIR:-/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/distillation_dataset_epoch50}"
-TEACHER_SUMMARY="/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_v2/teacher_quality_summary.json"
-OUTPUT_DIR="${OUTPUT_DIR:-${GR00T_ROOT}/outputs/libero_plus/gr00t_libero_plus_flare_epoch50}"
+DISTILLATION_DATASET_DIR="${DISTILLATION_DATASET_DIR:-/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/distillation_dataset_epoch50_fixed}"
+TEACHER_SUMMARY="/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_fixed_v2/teacher_quality_summary.json"
+OUTPUT_DIR="${OUTPUT_DIR:-${GR00T_ROOT}/outputs/libero_plus/gr00t_libero_plus_flare_epoch50_fixed}"
 
 export NUM_GPUS="${NUM_GPUS:-1}"
 export MAX_STEPS="${MAX_STEPS:-10000}"
@@ -38,7 +38,7 @@ TEACHER_MIX_RATIO=$(/root/autodl-tmp/envs/LeWorldModel/bin/python -c \
 export TEACHER_MIX_RATIO="${TEACHER_MIX_RATIO:-0.12}"
 
 echo "============================================"
-echo "  epoch-50 FLARE training"
+echo "  epoch-50 FLARE training (fixed manifest)"
 echo "  teacher count   : ${TEACHER_COUNT}"
 echo "  teacher mix ratio: ${TEACHER_MIX_RATIO}"
 echo "  distillation dir: ${DISTILLATION_DATASET_DIR}"
@@ -69,7 +69,7 @@ COMMON_ARGS=(
   --dataset-path "${DATASET_PATH}"
   --embodiment-tag libero_sim
   --output-dir "${OUTPUT_DIR}"
-  --experiment-name gr00t_libero_plus_flare_epoch50
+  --experiment-name gr00t_libero_plus_flare_epoch50_fixed
   --distillation-dataset-dir "${DISTILLATION_DATASET_DIR}"
   --keep-full-gt-dataset
   --teacher-mix-ratio "${TEACHER_MIX_RATIO}"

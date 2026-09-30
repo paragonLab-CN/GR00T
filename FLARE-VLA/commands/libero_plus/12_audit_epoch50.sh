@@ -13,9 +13,9 @@
 
 set -euo pipefail
 
-SCORING_DIR=/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50
-OUTPUT_DIR=/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_v2
-CANDIDATE_DIR=/root/autodl-tmp/Isaac-GR00T/outputs/libero_plus/sparse_candidates/candidates
+SCORING_DIR=/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_fixed
+OUTPUT_DIR=/root/autodl-tmp/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_fixed_v2
+CANDIDATE_DIR=/root/autodl-tmp/Isaac-GR00T/outputs/libero_plus/sparse_candidates_epoch50_fixed/candidates
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -23,7 +23,7 @@ export STABLEWM_HOME=/root/autodl-tmp/le-wm/stablewm_data
 export LOCAL_DATASET_DIR=/root/autodl-tmp/le-wm/stablewm_data
 
 echo "============================================"
-echo "  Libero-Plus Teacher Quality Audit (epoch 50)"
+echo "  Libero-Plus Teacher Quality Audit (epoch 50, fixed manifest)"
 echo "============================================"
 echo "  Scores : $SCORING_DIR"
 echo "  Output : $OUTPUT_DIR"
