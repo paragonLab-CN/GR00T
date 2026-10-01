@@ -16,6 +16,7 @@ set -euo pipefail
 SCORING_DIR=/root/autodl-tmp/Isaac-GR00T/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_fixed
 OUTPUT_DIR=/root/autodl-tmp/Isaac-GR00T/FLARE-VLA/outputs/libero_plus/teacher_scoring_epoch50_fixed_v2
 CANDIDATE_DIR=/root/autodl-tmp/Isaac-GR00T/outputs/libero_plus/sparse_candidates_epoch50_fixed/candidates
+MANIFEST=/root/autodl-tmp/Isaac-GR00T/FLARE-VLA/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -31,6 +32,8 @@ echo "============================================"
 
 /root/autodl-tmp/envs/LeWorldModel/bin/python -u \
   /root/autodl-tmp/Isaac-GR00T/FLARE-VLA/scripts/libero_plus/06_audit_teacher_quality.py \
+  --manifest "$MANIFEST" \
+  --scoring-run-summary "$SCORING_DIR/scoring_run_summary.json" \
   --scores-csv "$SCORING_DIR/validation_scores.csv" \
   --teacher-records "$SCORING_DIR/validation_teacher_records.pt" \
   --stepwise-npz "$SCORING_DIR/validation_stepwise_metrics.npz" \
