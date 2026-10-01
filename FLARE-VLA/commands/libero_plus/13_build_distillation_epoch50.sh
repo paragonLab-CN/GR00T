@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-REPO_ROOT=/root/autodl-tmp/FLARE-VLA
+REPO_ROOT=/root/autodl-tmp/Isaac-GR00T/FLARE-VLA
 
 MANIFEST="${REPO_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest.jsonl"
 MANIFEST_SUMMARY="${REPO_ROOT}/outputs/libero_plus/manifests_epoch50_fixed/libero_plus_sparse_manifest_summary.json"
@@ -22,7 +22,7 @@ CHECKPOINT_CONFIG="/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/li
 PROCESSOR_CONFIG="/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/libero_spatial/processor_config.json"
 OUTPUT_DIR="${REPO_ROOT}/outputs/libero_plus/distillation_dataset_epoch50_fixed"
 
-EXPECTED_GT_COUNT="${EXPECTED_GT_COUNT:-489632}"
+EXPECTED_GT_COUNT="${EXPECTED_GT_COUNT:-487880}"
 
 echo "=============================================="
 echo "Building epoch-50 distillation dataset index (fixed manifest)"
@@ -32,10 +32,10 @@ echo "Output dir:      ${OUTPUT_DIR}"
 echo "Expected GT:     ${EXPECTED_GT_COUNT}"
 echo "=============================================="
 
-cd "${REPO_ROOT}"
+cd /root/autodl-tmp/Isaac-GR00T
 
 /root/autodl-tmp/envs/LeWorldModel/bin/python \
-    scripts/spatial/08_build_spatial_distillation_dataset.py \
+    FLARE-VLA/scripts/spatial/08_build_spatial_distillation_dataset.py \
     --manifest "${MANIFEST}" \
     --manifest-summary "${MANIFEST_SUMMARY}" \
     --teacher-selected "${TEACHER_SELECTED}" \
