@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Evaluate the suite-corrected LIBERO-Plus GT-replay 54/10 checkpoint on the
+# Evaluate the epoch-50 fixed LIBERO-Plus GT-replay 44/20 checkpoint-10000 on the
 # frozen 112-task protocol. Both environment randomness and server-side
-# diffusion noise are fixed to seed 2026 for paired model comparison.
+# diffusion noise are fixed to seed 2026 for paired-model comparability with the
+# suite_corrected 54_10 / 44_20 evaluations. This run does NOT produce a paired
+# comparison file; it only writes summary_all.json / task_success_rates_all.csv.
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly GR00T_ROOT="${GR00T_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
-readonly EXPERIMENT_NAME="gr00t_libero_plus_flare_suite_corrected_gt_replay_54_10"
+readonly GR00T_PYTHON="${GR00T_ROOT}/.venv/bin/python"
+readonly EXPERIMENT_NAME="gr00t_libero_plus_flare_epoch50_fixed_44_20"
+readonly RUN_DIR_NAME="gr00t_libero_plus_flare_epoch50_fixed_44_20"
 readonly CHECKPOINT_STEP="10000"
 readonly PORT="${1:-5555}"
 
@@ -17,16 +21,11 @@ readonly EVAL_SEED="${EVAL_SEED:-${FIXED_SEED}}"
 readonly EXPECTED_TASK_COUNT="112"
 readonly EXPECTED_TASKS_SHA256="6412991d21db24aaacd402cdd35e716962df331112cdfa1a6201c20f306c3b3f"
 
-readonly MODEL_PATH="${MODEL_PATH:-${GR00T_ROOT}/outputs/libero_plus/${EXPERIMENT_NAME}/checkpoint-${CHECKPOINT_STEP}}"
+readonly MODEL_PATH="${MODEL_PATH:-${GR00T_ROOT}/outputs/libero_plus/${RUN_DIR_NAME}/${RUN_DIR_NAME}/checkpoint-${CHECKPOINT_STEP}}"
 readonly MODEL_TAG="${EXPERIMENT_NAME}_checkpoint_${CHECKPOINT_STEP}_fixed_noise_seed${FIXED_SEED}"
 readonly TASKS_PATH="${GR00T_ROOT}/outputs/eval_libero_plus/gr00t_libero_plus_flare_checkpoint_10000_fixed_noise_seed2026/tasks.tsv"
-
-readonly FLARE_SUMMARY="${GR00T_ROOT}/outputs/eval_libero_plus/gr00t_libero_plus_flare_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
-readonly IMAGE_AUG_SUMMARY="${GR00T_ROOT}/outputs/eval_libero_plus/gr00t_libero_plus_flare_image_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
-readonly GT_ONLY_SUMMARY="${GR00T_ROOT}/outputs/eval_libero_plus/gr00t_libero_plus_gt_only_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
 readonly OUTPUT_ROOT="${GR00T_ROOT}/outputs/eval_libero_plus/${MODEL_TAG}"
 readonly REPLAY_SUMMARY="${OUTPUT_ROOT}/summary_all.json"
-readonly COMPARISON_PATH="${OUTPUT_ROOT}/four_model_comparison.json"
 
 die() {
     echo "ERROR: $*" >&2
@@ -40,6 +39,7 @@ if [[ "${DIFFUSION_SEED}" != "${FIXED_SEED}" || "${EVAL_SEED}" != "${FIXED_SEED}
     die "this paired protocol is frozen at EVAL_SEED=DIFFUSION_SEED=${FIXED_SEED}"
 fi
 
+[[ -x "${GR00T_PYTHON}" ]] || die "project Python is unavailable: ${GR00T_PYTHON}"
 if pgrep -af '[l]aunch_finetune.py' | grep -F -- "--experiment_name ${EXPERIMENT_NAME}" >/dev/null; then
     die "training is still running for ${EXPERIMENT_NAME}; start evaluation after it exits"
 fi
@@ -55,19 +55,15 @@ actual_tasks_sha256="$(sha256sum "${TASKS_PATH}" | awk '{print $1}')"
 [[ "${actual_tasks_sha256}" == "${EXPECTED_TASKS_SHA256}" ]] || \
     die "task manifest changed: expected sha256 ${EXPECTED_TASKS_SHA256}, got ${actual_tasks_sha256}"
 
-for reference_summary in "${FLARE_SUMMARY}" "${IMAGE_AUG_SUMMARY}" "${GT_ONLY_SUMMARY}"; do
-    [[ -f "${reference_summary}" ]] || die "reference summary not found: ${reference_summary}"
-done
-
 cd "${GR00T_ROOT}"
 
 # Fail before starting the simulator if the final checkpoint is partial or if
 # its augmentation / GT-replay metadata does not match this evaluation target.
-uv run python scripts/flare/check_image_aug_checkpoint.py \
+"${GR00T_PYTHON}" scripts/flare/check_image_aug_checkpoint.py \
     "${MODEL_PATH}" \
     --expected-step "${CHECKPOINT_STEP}" \
-    --fixed-gt-samples-per-batch 54 \
-    --fixed-teacher-samples-per-batch 10 \
+    --fixed-gt-samples-per-batch 44 \
+    --fixed-teacher-samples-per-batch 20 \
     --require-full-training-state
 
 export OMP_NUM_THREADS=1
@@ -105,13 +101,5 @@ output_tasks_sha256="$(sha256sum "${OUTPUT_ROOT}/tasks.tsv" | awk '{print $1}')"
 [[ "${output_tasks_sha256}" == "${EXPECTED_TASKS_SHA256}" ]] || \
     die "evaluated task manifest does not match the frozen 112-task protocol"
 
-uv run python scripts/flare/summarize_fixed_noise_four.py \
-    "${FLARE_SUMMARY}" \
-    "${IMAGE_AUG_SUMMARY}" \
-    "${GT_ONLY_SUMMARY}" \
-    "${REPLAY_SUMMARY}" \
-    --output "${COMPARISON_PATH}"
-
 echo "Evaluation complete"
 echo "  summary:    ${REPLAY_SUMMARY}"
-echo "  comparison: ${COMPARISON_PATH}"

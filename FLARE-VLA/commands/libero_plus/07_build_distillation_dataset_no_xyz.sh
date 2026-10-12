@@ -1,7 +1,8 @@
-#!/bin/bash
-# Build spatial teacher distillation dataset index.
+#!/usr/bin/env bash
+# Build libero_plus teacher distillation dataset index, fed by the v3_no_xyz
+# audit (which retains trajectories beyond the GT xyz distance boundary).
 #
-# Produces:
+# Produces (in output dir):
 #   distillation_index.jsonl      mixed GT + teacher index
 #   teacher_index.jsonl           teacher-only index (for weighted mixing)
 #   teacher_records_enriched.pt   v1 enriched teacher records
@@ -11,29 +12,36 @@
 #   --keep-full-gt-dataset --teacher-mix-ratio 0.2
 #   --distillation-index-path .../teacher_index.jsonl
 #   --teacher-records-path .../teacher_records_enriched.pt
+#
+# NOTE: Update EXPECTED_GT_COUNT to the number of scored windows reported by
+# 06_score_candidates.sh before running.
+#
+# Usage: bash FLARE-VLA/commands/libero_plus/07_build_distillation_dataset_no_xyz.sh
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT=/root/autodl-tmp/FLARE-VLA
 
-MANIFEST="${REPO_ROOT}/outputs/spatial/manifests/spatial_sparse_manifest.jsonl"
-MANIFEST_SUMMARY="${REPO_ROOT}/outputs/spatial/manifests/spatial_sparse_manifest_summary.json"
-TEACHER_SELECTED="${REPO_ROOT}/outputs/spatial/10_teacher_scoring/teacher_quality_selected.jsonl"
-TEACHER_RECORDS="${REPO_ROOT}/outputs/spatial/10_teacher_scoring/teacher_quality_direct_records.pt"
-TEACHER_SUMMARY="${REPO_ROOT}/outputs/spatial/10_teacher_scoring/teacher_quality_summary.json"
+MANIFEST="${REPO_ROOT}/outputs/libero_plus/manifests/spatial_sparse_manifest.jsonl"
+MANIFEST_SUMMARY="${REPO_ROOT}/outputs/libero_plus/manifests/spatial_sparse_manifest_summary.json"
+TEACHER_SELECTED="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_v3_no_xyz/teacher_quality_selected.jsonl"
+TEACHER_RECORDS="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_v3_no_xyz/teacher_quality_direct_records.pt"
+TEACHER_SUMMARY="${REPO_ROOT}/outputs/libero_plus/teacher_scoring_v3_no_xyz/teacher_quality_summary.json"
 CHECKPOINT_CONFIG="/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/libero_spatial/config.json"
 PROCESSOR_CONFIG="/root/autodl-tmp/Isaac-GR00T/checkpoints/GR00T-N1.7-LIBERO/libero_spatial/processor_config.json"
-OUTPUT_DIR="${REPO_ROOT}/outputs/spatial/11_distillation_dataset"
+OUTPUT_DIR="${REPO_ROOT}/outputs/libero_plus/distillation_dataset_v3_no_xyz"
+
+EXPECTED_GT_COUNT="${EXPECTED_GT_COUNT:-489632}"
 
 echo "=============================================="
-echo "Building spatial distillation dataset index"
+echo "Building libero_plus distillation dataset index (v3 no_xyz)"
 echo "=============================================="
 echo "Manifest:        ${MANIFEST}"
 echo "Teacher records: ${TEACHER_RECORDS}"
 echo "Checkpoint:      ${CHECKPOINT_CONFIG}"
 echo "Output dir:      ${OUTPUT_DIR}"
-echo ""
+echo "Expected GT:     ${EXPECTED_GT_COUNT}"
+echo "=============================================="
 
 cd "${REPO_ROOT}"
 
@@ -49,8 +57,7 @@ python scripts/spatial/08_build_spatial_distillation_dataset.py \
     --embodiment-key libero_sim \
     --index-mode teacher_only \
     --quality-levels high medium \
-    --expected-gt-count 12599 \
-    --seed 42
+    --expected-gt-count "${EXPECTED_GT_COUNT}"
 
 echo ""
 echo "Done. Outputs in: ${OUTPUT_DIR}"

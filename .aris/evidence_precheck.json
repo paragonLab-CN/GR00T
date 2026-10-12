@@ -1,0 +1,91 @@
+{
+  "results": [
+    {
+      "id": "D2.deployed_44_20.success_rate",
+      "value": "0.8125",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.8125' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D2.gt_only_lr1e4_no_aug.success_rate",
+      "value": "0.8232142857142857",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_gt_only_lr1e4_no_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.8232142857142857' found in outputs/eval_libero_plus/gr00t_libero_plus_gt_only_lr1e4_no_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D2.v3_no_xyz.success_rate",
+      "value": "0.8294642857142858",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_v3_no_xyz_44_20_ck10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.8294642857142858' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_v3_no_xyz_44_20_ck10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D2.epoch50.success_rate",
+      "value": "0.8151785714285714",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_epoch50_fixed_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.8151785714285714' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_epoch50_fixed_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "C4_causal.mcnemar.v3_vs_deployed.p",
+      "value": "0.08422157489670003",
+      "source": "outputs/eval_libero_plus/paired_stats_controlled_four.json",
+      "status": "verified",
+      "detail": "'0.08422157489670003' found in outputs/eval_libero_plus/paired_stats_controlled_four.json"
+    },
+    {
+      "id": "D3.v3_no_xyz.success_rate",
+      "value": "0.8294642857142858",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_v3_no_xyz_44_20_ck10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.8294642857142858' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_v3_no_xyz_44_20_ck10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D3.v3_no_xyz.RIS",
+      "value": "0.34375",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_v3_no_xyz_44_20_ck10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.34375' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_v3_no_xyz_44_20_ck10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D3.deployed_44_20.RIS",
+      "value": "0.30000000000000004",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.30000000000000004' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_suite_corrected_gt_replay_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D3.gt_only.RIS",
+      "value": "0.30000000000000004",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_gt_only_lr1e4_no_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.30000000000000004' found in outputs/eval_libero_plus/gr00t_libero_plus_gt_only_lr1e4_no_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D3.epoch50.RIS",
+      "value": "0.29375",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_flare_epoch50_fixed_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.29375' found in outputs/eval_libero_plus/gr00t_libero_plus_flare_epoch50_fixed_44_20_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D4.gt_only_lr1e4_no_aug.success_rate",
+      "value": "0.8232142857142857",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_gt_only_lr1e4_no_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.8232142857142857' found in outputs/eval_libero_plus/gr00t_libero_plus_gt_only_lr1e4_no_aug_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    },
+    {
+      "id": "D4.old_gt_only.success_rate",
+      "value": "0.7964285714285714",
+      "source": "outputs/eval_libero_plus/gr00t_libero_plus_gt_only_checkpoint_10000_fixed_noise_seed2026/summary_all.json",
+      "status": "verified",
+      "detail": "'0.7964285714285714' found in outputs/eval_libero_plus/gr00t_libero_plus_gt_only_checkpoint_10000_fixed_noise_seed2026/summary_all.json"
+    }
+  ],
+  "summary": {
+    "verified": 12
+  }
+}
