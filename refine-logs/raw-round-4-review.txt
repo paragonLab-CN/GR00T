@@ -1,0 +1,47 @@
+Round 4 review (verbatim, from Codex MCP thread 01a12fe3-84d6-7b83-998d-c1ffdb7fd95b):
+
+## 7 Scores
+| Dimension | Weight | Score |
+|---|---:|---:|
+| Problem Fidelity | 15% | 9.8/10 |
+| Method Specificity | 25% | 9.2/10 |
+| Contribution Quality | 25% | 8.2/10 |
+| Frontier Leverage | 15% | 9.5/10 |
+| Feasibility | 10% | 9.0/10 |
+| Validation Focus | 5% | 9.3/10 |
+| Venue Readiness | 5% | 8.0/10 |
+
+## Weighted Overall
+9.0/10. Exact weighted score: 9.01/10.
+
+## Verdict
+READY. No blocking methodological issue remains. The proposal is ready for implementation and empirical evaluation. "Ready" does not prejudge whether the eventual effect size will clear the venue bar.
+
+## Drift Warning
+None. The Problem Anchor is preserved verbatim and substantively. The dominant contribution is sharp rather than broad: fixed-budget task-relative calibration subject to an independently calibrated latent-regret safety boundary.
+
+## Simplification Opportunities
+The method is minimal and should not be expanded.
+- Prerequisites enforce basic validity.
+- safety_r defines eligibility independently of the data budget.
+- safety_z ranks eligible samples using task-relative evidence.
+- Top-K enforces exact budget parity.
+- Pol_z isolates the effect of the latent boundary.
+Do not add per-task learned thresholds, a second scorer, or another acceptance gate. The current abort conditions are preferable to heuristic fallbacks.
+
+## Modernization Opportunities
+Frontier leverage is appropriate. No VLM judge, reward model, diffusion component, or RL stage is warranted. The proposal's modern contribution is disciplined use of pretrained latent evidence under a controlled data budget, not architectural expansion.
+
+## Remaining Action Items
+
+### CRITICAL
+None.
+
+### IMPORTANT
+- Run the complete data-level audit before launching seven fine-tunes. Materialize both policies and verify |E| >= 309128; exactly 309,128 unique records per policy; all selected records satisfy their respective prerequisites; Pol_full contains no safety_r > tau_r records; deterministic reruns produce identical sample-ID hashes; every task retains nonzero coverage; checksum the calibration subset, tau_r, epsilon, and policy outputs. Failure of |E| >= K or the two-epsilon Spearman condition remains failure of the proposed full method; continuing with Pol_z is an informative fallback, not successful validation of the dominant claim.
+- Keep the Spearman check's interpretation narrow. |rho| <= 0.10 does not by itself prove cross-task calibration or teacher reliability. Present it as a sanity check. The evidence for the latent constraint must ultimately come from the controlled Pol_z versus Pol_full comparison and the rescueability moderation analysis.
+
+### MINOR
+- Fully specify quantile computation. Record: whether tau_r is estimated over all calibration records or only finite, prerequisite-qualified records; how automatically ineligible non-finite records enter the target rejection rate; the empirical-quantile interpolation convention; whether the baseline rejection rate uses the full population or the matching calibration population. Prefer computing the baseline rejection fraction and the r_s quantile on the same prerequisite-qualified calibration population.
+- Document calibration-subset reuse. If calibration episodes are pooled back into the selection population, state that explicitly. This is acceptable because no downstream success labels are used, but those episodes receive in-sample empirical-CDF scores while the other episodes receive out-of-sample scores.
+- Acknowledge dependence sensitivity of the max-CDF score. Although each component is task-relative, the distribution of their maximum depends on within-task correlations among the five metrics. This is defensible as a conjunctive "worst component" criterion, but the paper should not claim that z_s is uniformly distributed across tasks. Report its per-task calibration distribution and describe the correlation sensitivity as intentional rather than implying complete joint normalization.
