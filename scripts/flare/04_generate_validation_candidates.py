@@ -28,16 +28,18 @@ import sys
 import time
 from typing import Any
 
+
 # These must be set before importing torch/GR00T.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 os.environ.setdefault("PYTHONHASHSEED", "0")
 
-import numpy as np
-import torch
-
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.policy.gr00t_policy import Gr00tPolicy
+from gr00t.utils.checkpoint_snapshot import checkpoint_snapshot_sha256
+import numpy as np
+import torch
+
 
 # Import the already-tested helpers from the sibling candidate script.
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -53,6 +55,7 @@ from generate_k_candidates_openloop import (  # noqa: E402
     prepare_observation_data,
     set_seed,
 )
+
 
 FORMAT = "flare_groot_manifest_candidates_v1"
 REQUIRED_MANIFEST_KEYS = {
@@ -97,9 +100,7 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
                 raise RuntimeError(f"Invalid JSON at {path}:{line_no}: {exc}") from exc
             missing = REQUIRED_MANIFEST_KEYS - set(row)
             if missing:
-                raise RuntimeError(
-                    f"Manifest line {line_no} is missing keys: {sorted(missing)}"
-                )
+                raise RuntimeError(f"Manifest line {line_no} is missing keys: {sorted(missing)}")
             rows.append(row)
     if not rows:
         raise RuntimeError(f"Manifest is empty: {path}")
@@ -116,9 +117,7 @@ def validate_manifest(
 
     sample_indices = [int(row["sample_index"]) for row in rows]
     if sample_indices != list(range(len(rows))):
-        raise RuntimeError(
-            "Manifest sample_index must be contiguous and ordered 0..N-1"
-        )
+        raise RuntimeError("Manifest sample_index must be contiguous and ordered 0..N-1")
 
     all_candidate_seeds: list[int] = []
     for row in rows:
@@ -145,14 +144,10 @@ def validate_manifest(
         candidate_k = int(row["candidate_k"])
         candidate_seeds = [int(v) for v in row["candidate_seeds"]]
         if len(candidate_seeds) != candidate_k:
-            raise RuntimeError(
-                f"candidate_seeds length mismatch in {row['sample_id']}"
-            )
+            raise RuntimeError(f"candidate_seeds length mismatch in {row['sample_id']}")
         expected = [int(row["sample_seed"]) + i for i in range(candidate_k)]
         if candidate_seeds != expected:
-            raise RuntimeError(
-                f"candidate_seeds do not match sample_seed in {row['sample_id']}"
-            )
+            raise RuntimeError(f"candidate_seeds do not match sample_seed in {row['sample_id']}")
         all_candidate_seeds.extend(candidate_seeds)
 
     if len(all_candidate_seeds) != len(set(all_candidate_seeds)):
@@ -171,6 +166,21 @@ def candidate_file(output_dir: Path, sample_id: str) -> Path:
     return output_dir / "candidates" / f"{sample_id}.pt"
 
 
+def verify_policy_checkpoint(model_path: Path, expected_sha256: str | None) -> str | None:
+    """Opt in to immutable single-policy provenance without changing legacy runs."""
+
+    if expected_sha256 is None:
+        return None
+    if len(expected_sha256) != 64 or any(
+        value not in "0123456789abcdef" for value in expected_sha256
+    ):
+        raise ValueError("--policy-checkpoint-sha256 must be 64 lowercase hex characters")
+    actual = checkpoint_snapshot_sha256(model_path)
+    if actual != expected_sha256:
+        raise RuntimeError(f"Policy checkpoint SHA-256 mismatch: {actual} != {expected_sha256}")
+    return actual
+
+
 def validate_existing_candidate(
     path: Path,
     manifest_row: dict[str, Any],
@@ -178,6 +188,7 @@ def validate_existing_candidate(
     manifest_sha256: str,
     manifest_format: str,
     model_path: str,
+    policy_checkpoint_sha256: str | None = None,
 ) -> tuple[bool, str]:
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -195,6 +206,11 @@ def validate_existing_candidate(
             return False, "manifest_format mismatch"
         if payload.get("model_path") != model_path:
             return False, "model_path mismatch"
+        if (
+            policy_checkpoint_sha256 is not None
+            and payload.get("policy_checkpoint_sha256") != policy_checkpoint_sha256
+        ):
+            return False, "policy_checkpoint_sha256 mismatch"
         if payload.get("sample_id") != manifest_row["sample_id"]:
             return False, "sample_id mismatch"
         if int(payload.get("episode_index")) != int(manifest_row["episode_index"]):
@@ -250,10 +266,15 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--dataset-path", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True)
+    parser.add_argument(
+        "--policy-checkpoint-sha256",
+        default=None,
+        help="Opt in to a frozen single-policy snapshot; verify its content hash before and after generation.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--expected-suite",
@@ -278,7 +299,9 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--save-initial-noises", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--save-initial-noises", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--save-observations", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--global-seed", type=int, default=42)
     args = parser.parse_args()
@@ -292,10 +315,10 @@ def main() -> None:
     for path in (args.manifest, args.dataset_path, args.model_path):
         if not path.exists():
             raise FileNotFoundError(path)
-    if (
-        args.expected_suite is not None
-        and args.model_path.resolve().name != args.expected_suite
-    ):
+    policy_checkpoint_sha256 = verify_policy_checkpoint(
+        args.model_path, args.policy_checkpoint_sha256
+    )
+    if args.expected_suite is not None and args.model_path.resolve().name != args.expected_suite:
         raise RuntimeError(
             f"Model directory {args.model_path.resolve()} does not match "
             f"expected suite {args.expected_suite!r}"
@@ -309,9 +332,7 @@ def main() -> None:
     validate_manifest(manifest_rows, args.expected_suite)
     manifest_sha256 = sha256_file(args.manifest)
 
-    selected_rows = [
-        row for row in manifest_rows if int(row["sample_index"]) >= args.start_index
-    ]
+    selected_rows = [row for row in manifest_rows if int(row["sample_index"]) >= args.start_index]
     if args.max_samples is not None:
         if args.max_samples < 1:
             raise ValueError("--max-samples must be >= 1")
@@ -425,6 +446,7 @@ def main() -> None:
                     manifest_sha256,
                     args.manifest_format,
                     str(args.model_path.resolve()),
+                    policy_checkpoint_sha256,
                 )
                 if valid:
                     counters["skipped_valid"] += 1
@@ -447,14 +469,12 @@ def main() -> None:
                     raise RuntimeError(f"Expected batch size 1, got {batch_size}")
 
                 noise_shape = _get_internal_noise_shape(policy, batch_size)
-                initial_noises, candidate_seeds, shared_base_seed = (
-                    build_explicit_initial_noises(
-                        shape=noise_shape,
-                        candidate_k=int(row["candidate_k"]),
-                        sample_seed=int(row["sample_seed"]),
-                        noise_mode=str(row["noise_mode"]),
-                        noise_scale=float(row["noise_scale"]),
-                    )
+                initial_noises, candidate_seeds, shared_base_seed = build_explicit_initial_noises(
+                    shape=noise_shape,
+                    candidate_k=int(row["candidate_k"]),
+                    sample_seed=int(row["sample_seed"]),
+                    noise_mode=str(row["noise_mode"]),
+                    noise_scale=float(row["noise_scale"]),
                 )
                 expected_seeds = [int(v) for v in row["candidate_seeds"]]
                 if candidate_seeds != expected_seeds:
@@ -512,10 +532,7 @@ def main() -> None:
                 if candidate_k > 1:
                     pairwise_diff = float(
                         np.max(
-                            np.abs(
-                                candidate_actions_concat[:, 0]
-                                - candidate_actions_concat[:, 1]
-                            )
+                            np.abs(candidate_actions_concat[:, 0] - candidate_actions_concat[:, 1])
                         )
                     )
 
@@ -546,24 +563,20 @@ def main() -> None:
                     "internal_noise_shape_per_candidate": list(noise_shape),
                     "action_keys": action_keys,
                     "candidate_actions": _to_saveable_cpu(stacked_fields),
-                    "candidate_actions_concat": torch.from_numpy(
-                        candidate_actions_concat.copy()
-                    ),
+                    "candidate_actions_concat": torch.from_numpy(candidate_actions_concat.copy()),
                     "gt_actions": _to_saveable_cpu(gt_fields),
                     "gt_actions_concat": torch.from_numpy(gt_action_concat.copy()),
                     "candidate_0_vs_1_max_abs_diff": pairwise_diff,
-                    "candidate_generation_mode": (
-                        "cached_backbone_vectorized_action_head"
-                    ),
-                    "backbone_evaluations": int(
-                        candidate_info.get("backbone_evaluations", 1)
-                    ),
+                    "candidate_generation_mode": ("cached_backbone_vectorized_action_head"),
+                    "backbone_evaluations": int(candidate_info.get("backbone_evaluations", 1)),
                     "generation_seconds": time.time() - sample_start,
                 }
                 if args.save_initial_noises:
                     payload["initial_noises"] = initial_noises.cpu()
                 if args.save_observations:
                     payload["observations"] = _to_saveable_cpu(parsed_obs)
+                if policy_checkpoint_sha256 is not None:
+                    payload["policy_checkpoint_sha256"] = policy_checkpoint_sha256
 
                 atomic_torch_save(payload, output_path)
                 valid, reason = validate_existing_candidate(
@@ -573,6 +586,7 @@ def main() -> None:
                     manifest_sha256,
                     args.manifest_format,
                     str(args.model_path.resolve()),
+                    policy_checkpoint_sha256,
                 )
                 if not valid:
                     raise RuntimeError(f"Post-save validation failed: {reason}")
@@ -616,6 +630,8 @@ def main() -> None:
                 logging.exception("[%s] generation failed", sample_id)
                 torch.cuda.empty_cache()
 
+    # Do not publish a PASS summary if weights/config changed during generation.
+    verify_policy_checkpoint(args.model_path, policy_checkpoint_sha256)
     elapsed = time.time() - start_time
     summary = {
         "format": "flare_candidate_generation_summary_v1",
@@ -635,6 +651,8 @@ def main() -> None:
         "elapsed_seconds": elapsed,
         "average_seconds_per_selected_sample": elapsed / len(selected_rows),
     }
+    if policy_checkpoint_sha256 is not None:
+        summary["policy_checkpoint_sha256"] = policy_checkpoint_sha256
     summary_path = output_dir / "candidate_generation_summary.json"
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),

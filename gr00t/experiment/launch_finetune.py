@@ -96,9 +96,7 @@ if __name__ == "__main__":
             )
         teacher_mix_ratio = float(ft_config.teacher_mix_ratio)
         if not 0.0 < teacher_mix_ratio < 1.0:
-            raise ValueError(
-                f"teacher_mix_ratio must lie in (0, 1), got {teacher_mix_ratio}"
-            )
+            raise ValueError(f"teacher_mix_ratio must lie in (0, 1), got {teacher_mix_ratio}")
         if int(flare_sidecars.source_counts.get("gt", 0)) != 0:
             raise ValueError(
                 "Keeping the full physical GT dataset requires a teacher-only FLARE "
@@ -131,9 +129,7 @@ if __name__ == "__main__":
             "dataset_paths": [ft_config.dataset_path],
             "mix_ratio": 1.0,
             "embodiment_tag": embodiment_tag,
-            "dataset_type": (
-                "flare_distillation" if flare_requested else "physical_embodiment"
-            ),
+            "dataset_type": ("flare_distillation" if flare_requested else "physical_embodiment"),
         }
         if flare_sidecars is not None:
             dataset_config.update(
@@ -180,6 +176,7 @@ if __name__ == "__main__":
     config.model.tune_visual = ft_config.tune_visual
     config.model.tune_projector = ft_config.tune_projector
     config.model.tune_diffusion_model = ft_config.tune_diffusion_model
+    config.model.group_teacher_loss_weight = ft_config.group_teacher_loss_weight
     config.model.state_dropout_prob = ft_config.state_dropout_prob
     config.model.random_rotation_angle = ft_config.random_rotation_angle
     config.model.color_jitter_params = ft_config.color_jitter_params
@@ -190,7 +187,9 @@ if __name__ == "__main__":
 
     config.model.load_bf16 = False
     config.model.reproject_vision = False
-    config.model.model_name = os.environ.get("GR00T_BACKBONE_MODEL_NAME", "nvidia/Cosmos-Reason2-2B")
+    config.model.model_name = os.environ.get(
+        "GR00T_BACKBONE_MODEL_NAME", "nvidia/Cosmos-Reason2-2B"
+    )
     config.model.backbone_trainable_params_fp32 = True
     config.model.use_relative_action = True
 
@@ -239,8 +238,7 @@ if __name__ == "__main__":
         print(json.dumps(resolved, indent=2))
         if config.data.fixed_gt_samples_per_batch is not None:
             fixed_total = (
-                config.data.fixed_gt_samples_per_batch
-                + config.data.fixed_teacher_samples_per_batch
+                config.data.fixed_gt_samples_per_batch + config.data.fixed_teacher_samples_per_batch
             )
             print(
                 "Fixed per-device batch composition: "

@@ -112,6 +112,8 @@ class Gr00tN1d7Config(PretrainedConfig):
     tune_projector: bool = True
     tune_diffusion_model: bool = True
     tune_vlln: bool = True
+    # Applied only when group-teacher source metadata is present in the batch.
+    group_teacher_loss_weight: float = 0.3
 
     # State augmentation parameters
     state_dropout_prob: float = 0.8  # State dropout probability

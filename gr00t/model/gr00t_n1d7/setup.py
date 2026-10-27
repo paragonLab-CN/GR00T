@@ -86,6 +86,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 tune_projector=self.config.model.tune_projector,
                 tune_diffusion_model=self.config.model.tune_diffusion_model,
                 tune_vlln=self.config.model.tune_vlln,
+                group_teacher_loss_weight=self.config.model.group_teacher_loss_weight,
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,
@@ -230,6 +231,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
     def _create_collator(self):
         data_collator = self.processor.collator
+        data_collator.group_teacher_mode = any(
+            getattr(dataset, "group_teacher", None) is not None
+            for dataset in getattr(getattr(self, "train_dataset", None), "datasets", [])
+        )
         return data_collator
 
 

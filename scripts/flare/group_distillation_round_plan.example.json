@@ -1,0 +1,103 @@
+{
+  "format": "flare_group_round_plan_v1",
+  "cwd": "/workspace/GR00T",
+  "initial_policy_checkpoint": "/workspace/GR00T/checkpoints/REPLACE_WITH_LIBERO_FINETUNED_STUDENT",
+  "work_dir": "/workspace/outputs/trusted_prefix_group_distillation",
+  "rounds": 2,
+  "start_round": 0,
+  "seed": 42,
+  "next_checkpoint": "{training_output_dir}/checkpoint-1000",
+  "group_python": "/workspace/GR00T/.venv/bin/python",
+  "variables": {
+    "groot_python": "/workspace/GR00T/.venv/bin/python",
+    "lewm_python": "/workspace/envs/LeWorldModel/bin/python",
+    "lewm_root": "/workspace/le-wm",
+    "dataset_path": "/workspace/GR00T/examples/LIBERO/libero_plus_lerobot",
+    "manifest": "/workspace/assets/libero_plus_sparse_manifest.jsonl",
+    "manifest_summary": "/workspace/assets/libero_plus_sparse_manifest_summary.json",
+    "gt_h5": "/workspace/assets/libero_plus_h8_framebank.h5",
+    "world_model_checkpoint": "/workspace/assets/weights_epoch_50.pt",
+    "world_model_sha256": "REPLACE_WITH_CHECKPOINT_SHA256",
+    "suite_checkpoint_root": "/workspace/GR00T/checkpoints/GR00T-N1.7-LIBERO",
+    "backbone_model": "/workspace/GR00T/checkpoints/Cosmos-Reason2-2B",
+    "expected_samples": 487880,
+    "oracle_max_mse": "REPLACE_WITH_CALIBRATED_ORACLE_MSE",
+    "max_paired_gap": "REPLACE_WITH_CALIBRATED_PAIRED_GAP",
+    "min_score_span": "REPLACE_WITH_CALIBRATED_MIN_SCORE_SPAN",
+    "score_std_floor": "REPLACE_WITH_CALIBRATED_SCORE_NOISE_FLOOR"
+  },
+  "group_builder_args": [
+    "--score-metric", "mse",
+    "--score-scope", "shared-prefix",
+    "--oracle-max-mse", "{oracle_max_mse}",
+    "--max-paired-gap", "{max_paired_gap}",
+    "--min-score-span", "{min_score_span}",
+    "--score-std-floor", "{score_std_floor}",
+    "--min-prefix", "2",
+    "--temperature", "1.0",
+    "--world-model-checkpoint-sha256", "{world_model_sha256}"
+  ],
+  "commands": {
+    "generate": [[
+      "env", "HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1",
+      "GR00T_BACKBONE_MODEL_NAME={backbone_model}",
+      "{groot_python}", "scripts/flare/04_generate_validation_candidates.py",
+      "--manifest", "{manifest}",
+      "--manifest-format", "libero_plus_sparse_manifest_v1",
+      "--dataset-path", "{dataset_path}",
+      "--model-path", "{policy_checkpoint}",
+      "--policy-checkpoint-sha256", "{policy_checkpoint_sha256}",
+      "--output-dir", "{generation_dir}",
+      "--embodiment-tag", "LIBERO_PANDA",
+      "--action-horizon", "8", "--global-seed", "{round_seed}"
+    ]],
+    "score": [[
+      "env", "LEWM_ROOT={lewm_root}",
+      "{lewm_python}", "FLARE-VLA/scripts/libero_plus/05_score_libero_plus.py",
+      "--manifest", "{manifest}",
+      "--candidate-dir", "{candidate_dir}",
+      "--candidate-summary", "{candidate_summary}",
+      "--single-policy-checkpoint", "{policy_checkpoint}",
+      "--policy-checkpoint-sha256", "{policy_checkpoint_sha256}",
+      "--gt-h5", "{gt_h5}",
+      "--checkpoint", "{world_model_checkpoint}",
+      "--expected-checkpoint-sha256", "{world_model_sha256}",
+      "--output-dir", "{score_dir}", "--batch-size", "32", "--device", "cuda"
+    ]],
+    "prepare_teacher": [[
+      "{lewm_python}", "FLARE-VLA/scripts/libero_plus/06_audit_teacher_quality.py",
+      "--manifest", "{manifest}",
+      "--scoring-run-summary", "{score_dir}/scoring_run_summary.json",
+      "--scores-csv", "{score_dir}/validation_scores.csv",
+      "--teacher-records", "{score_dir}/validation_teacher_records.pt",
+      "--stepwise-npz", "{score_dir}/validation_stepwise_metrics.npz",
+      "--validation-summary", "{score_dir}/validation_summary.json",
+      "--candidate-dir", "{candidate_dir}",
+      "--output-dir", "{round_dir}/quality_audit",
+      "--expected-samples", "{expected_samples}", "--primary-metric", "mse"
+    ], [
+      "{lewm_python}", "FLARE-VLA/scripts/libero_plus/08_build_distillation_dataset.py",
+      "--manifest", "{manifest}", "--manifest-summary", "{manifest_summary}",
+      "--teacher-selected", "{round_dir}/quality_audit/teacher_quality_selected.jsonl",
+      "--teacher-records", "{round_dir}/quality_audit/teacher_quality_filtered_records.pt",
+      "--teacher-summary", "{round_dir}/quality_audit/teacher_quality_summary.json",
+      "--checkpoint-root", "{suite_checkpoint_root}",
+      "--output-dir", "{source_distillation_dir}",
+      "--index-mode", "teacher_only", "--expected-gt-count", "{expected_samples}"
+    ]],
+    "train": [[
+      "env", "HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1",
+      "GR00T_BACKBONE_MODEL_NAME={backbone_model}",
+      "{groot_python}", "gr00t/experiment/launch_finetune.py",
+      "--base-model-path", "{policy_checkpoint}",
+      "--dataset-path", "{dataset_path}", "--embodiment-tag", "LIBERO_PANDA",
+      "--distillation-dataset-dir", "{group_dataset_dir}",
+      "--keep-full-gt-dataset", "--allow-padding",
+      "--fixed-gt-samples-per-batch", "44", "--fixed-teacher-samples-per-batch", "20",
+      "--teacher-mix-ratio", "0.3125", "--group-teacher-loss-weight", "0.3",
+      "--global-batch-size", "64", "--num-gpus", "1",
+      "--max-steps", "1000", "--save-steps", "1000", "--save-only-model",
+      "--output-dir", "{training_output_dir}"
+    ]]
+  }
+}

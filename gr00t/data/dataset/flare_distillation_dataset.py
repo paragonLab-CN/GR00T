@@ -12,6 +12,11 @@ one training window:
   the raw LeRobot action prefix with the selected FLARE teacher action, then
   applies the official GR00T processor and masks the unsupervised action tail.
 
+Optional ``group_teacher`` records sample one whole candidate per shard load,
+supervise its trusted prefix, and fall back to full GT when the group has no
+eligible candidate. Diagnostic record reads reuse the last sampled candidate
+or a deterministic first-load preview; they never advance the sampling stream.
+
 The teacher replacement intentionally happens *before* GR00T relative-action
 conversion and normalization.  This is required because the saved teacher
 records use raw LeRobot action convention.
@@ -32,6 +37,7 @@ import torch
 from gr00t.data.interfaces import ShardedDataset
 from gr00t.data.types import EmbodimentTag, MessageType, ModalityConfig, VLAStepData
 
+from .flare_group_teacher import sample_group_candidate, validate_group_teacher
 from .lerobot_episode_loader import LeRobotEpisodeLoader
 from .sharded_single_step_dataset import extract_step_data
 
@@ -54,8 +60,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
                 raise RuntimeError(f"Invalid JSON at {path}:{line_no}: {exc}") from exc
             if not isinstance(row, dict):
                 raise TypeError(
-                    f"Expected a JSON object at {path}:{line_no}, "
-                    f"got {type(row).__name__}"
+                    f"Expected a JSON object at {path}:{line_no}, got {type(row).__name__}"
                 )
             rows.append(row)
     if not rows:
@@ -103,7 +108,7 @@ class FlareDistillationDataset(ShardedDataset):
         video_backend: Video decoding backend used by the official loader.
         video_backend_kwargs: Optional backend-specific arguments.
         shard_size: Number of indexed records per shard.
-        seed: Stored for reproducibility and future shard policies.
+        seed: Reproducible shard ordering and group-candidate sampling seed.
         allow_padding: Clamp temporal indices to the episode boundary.  The
             current FLARE manifest was constructed for horizon 8 while the
             GR00T processor requests horizon 16, so this normally needs to be
@@ -146,9 +151,7 @@ class FlareDistillationDataset(ShardedDataset):
                 f"Distillation index does not exist: {self.distillation_index_path}"
             )
         if not self.teacher_records_path.is_file():
-            raise FileNotFoundError(
-                f"Teacher records do not exist: {self.teacher_records_path}"
-            )
+            raise FileNotFoundError(f"Teacher records do not exist: {self.teacher_records_path}")
 
         self.index_rows = _load_jsonl(self.distillation_index_path)
         self.teacher_records = _load_torch_dict(self.teacher_records_path)
@@ -177,6 +180,8 @@ class FlareDistillationDataset(ShardedDataset):
         self._validate_teacher_records()
         self._validate_index()
         self._build_shards()
+        self._group_shard_load_counts: dict[tuple[int, int, int], int] = defaultdict(int)
+        self._group_candidate_by_record: dict[int, int | None] = {}
 
     @property
     def num_records(self) -> int:
@@ -186,7 +191,7 @@ class FlareDistillationDataset(ShardedDataset):
 
     @property
     def source_counts(self) -> dict[str, int]:
-        """Return counts of GT and teacher records."""
+        """Return nominal index counts, including group fallbacks as teacher rows."""
 
         return dict(Counter(str(row["source"]) for row in self.index_rows))
 
@@ -235,9 +240,7 @@ class FlareDistillationDataset(ShardedDataset):
         self.teacher_horizon = int(self.teacher_records["teacher_horizon"])
         self.supervised_steps = self.teacher_horizon
         self.teacher_action_dim = int(self.teacher_records["action_dim"])
-        saved_processor_horizon = int(
-            self.teacher_records["processor_action_horizon"]
-        )
+        saved_processor_horizon = int(self.teacher_records["processor_action_horizon"])
         saved_action_keys = [str(key) for key in self.teacher_records["action_keys"]]
 
         expected_shape = (
@@ -271,9 +274,7 @@ class FlareDistillationDataset(ShardedDataset):
             )
 
         n = self.teacher_actions.shape[0]
-        self.teacher_sample_ids = [
-            str(value) for value in self.teacher_records["sample_ids"]
-        ]
+        self.teacher_sample_ids = [str(value) for value in self.teacher_records["sample_ids"]]
         self.teacher_sample_indices = torch.as_tensor(
             self.teacher_records["sample_indices"], dtype=torch.long
         ).reshape(-1)
@@ -291,11 +292,13 @@ class FlareDistillationDataset(ShardedDataset):
             ("local_steps", self.teacher_local_steps),
         ]:
             if len(values) != n:
-                raise RuntimeError(
-                    f"Teacher field {name} has length {len(values)}, expected {n}"
-                )
+                raise RuntimeError(f"Teacher field {name} has length {len(values)}, expected {n}")
         if len(set(self.teacher_sample_ids)) != n:
             raise RuntimeError("Duplicate sample_id detected in teacher records")
+
+        self.group_teacher = validate_group_teacher(
+            self.teacher_records.get("group_teacher"), self.teacher_records
+        )
 
     def _validate_index(self) -> None:
         required = [
@@ -368,9 +371,7 @@ class FlareDistillationDataset(ShardedDataset):
 
             if source == "gt":
                 if row["teacher_row"] is not None:
-                    raise RuntimeError(
-                        f"GT row {expected_index} must have teacher_row=null"
-                    )
+                    raise RuntimeError(f"GT row {expected_index} must have teacher_row=null")
                 continue
 
             teacher_row = int(row["teacher_row"])
@@ -419,11 +420,12 @@ class FlareDistillationDataset(ShardedDataset):
             record_indices[start : start + self.shard_size]
             for start in range(0, self.num_records, self.shard_size)
         ]
-        self.shard_lengths = np.asarray(
-            [len(shard) for shard in self.shards], dtype=np.int64
-        )
+        self.shard_lengths = np.asarray([len(shard) for shard in self.shards], dtype=np.int64)
         if len(self.shards) == 0 or bool((self.shard_lengths <= 0).any()):
             raise RuntimeError("FLARE sharding produced an empty shard")
+        self._record_shard_indices = np.empty(self.num_records, dtype=np.int64)
+        for shard_index, indices in enumerate(self.shards):
+            self._record_shard_indices[indices] = shard_index
 
     def __len__(self) -> int:
         """Return the number of shards, as required by ``ShardedDataset``."""
@@ -461,23 +463,24 @@ class FlareDistillationDataset(ShardedDataset):
         self,
         vla_step_data: VLAStepData,
         teacher_row: int,
+        *,
+        teacher_actions_lerobot: torch.Tensor | None = None,
     ) -> VLAStepData:
-        teacher = self.teacher_actions[teacher_row].numpy()
+        teacher = (
+            self.teacher_actions[teacher_row]
+            if teacher_actions_lerobot is None
+            else teacher_actions_lerobot
+        ).numpy()
         new_actions: dict[str, np.ndarray] = {}
         column_offset = 0
 
         for key in self.action_keys:
             if key not in vla_step_data.actions:
-                raise KeyError(
-                    f"Action key {key!r} is missing from extracted VLAStepData"
-                )
-            official_action = np.asarray(
-                vla_step_data.actions[key], dtype=np.float32
-            )
+                raise KeyError(f"Action key {key!r} is missing from extracted VLAStepData")
+            official_action = np.asarray(vla_step_data.actions[key], dtype=np.float32)
             if official_action.ndim != 2:
                 raise RuntimeError(
-                    f"Action {key!r} must have shape [H, D], got "
-                    f"{official_action.shape}"
+                    f"Action {key!r} must have shape [H, D], got {official_action.shape}"
                 )
             if official_action.shape[0] < self.teacher_horizon:
                 raise RuntimeError(
@@ -495,9 +498,7 @@ class FlareDistillationDataset(ShardedDataset):
                 )
 
             replaced_action = official_action.copy()
-            replaced_action[: self.teacher_horizon] = teacher[
-                :, column_offset:next_offset
-            ]
+            replaced_action[: self.teacher_horizon] = teacher[:, column_offset:next_offset]
             new_actions[key] = replaced_action
             column_offset = next_offset
 
@@ -518,6 +519,126 @@ class FlareDistillationDataset(ShardedDataset):
         )
         return replace(vla_step_data, actions=new_actions, metadata=metadata)
 
+    @staticmethod
+    def _group_sampling_context() -> tuple[int, int]:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        return rank, worker_id
+
+    def _draw_group_candidate(
+        self,
+        record: dict[str, Any],
+        *,
+        shard_index: int,
+        load_index: int,
+        rank: int,
+        worker_id: int,
+    ) -> int | None:
+        if self.group_teacher is None:
+            raise RuntimeError("Group-candidate sampling requires group_teacher records")
+        teacher_row = int(record["teacher_row"])
+        seed_sequence = np.random.SeedSequence(
+            [
+                self.seed,
+                int(self.group_teacher["round_id"]),
+                rank,
+                worker_id,
+                shard_index,
+                load_index,
+                teacher_row,
+            ]
+        )
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed_sequence.generate_state(1, dtype=np.uint64)[0]))
+        return sample_group_candidate(
+            self.group_teacher["candidate_probabilities"][teacher_row], generator
+        )
+
+    def _group_candidate_for_record(self, record: dict[str, Any]) -> int | None:
+        record_index = int(record["distillation_index"])
+        if record_index in self._group_candidate_by_record:
+            return self._group_candidate_by_record[record_index]
+        rank, worker_id = self._group_sampling_context()
+        return self._draw_group_candidate(
+            record,
+            shard_index=int(self._record_shard_indices[record_index]),
+            load_index=0,
+            rank=rank,
+            worker_id=worker_id,
+        )
+
+    def _resample_group_shard(self, shard_index: int) -> None:
+        rank, worker_id = self._group_sampling_context()
+        key = (rank, worker_id, shard_index)
+        load_index = self._group_shard_load_counts[key]
+        self._group_shard_load_counts[key] += 1
+        for record_index in self.shards[shard_index]:
+            record = self.index_rows[int(record_index)]
+            if str(record["source"]) == "teacher":
+                self._group_candidate_by_record[int(record_index)] = self._draw_group_candidate(
+                    record,
+                    shard_index=shard_index,
+                    load_index=load_index,
+                    rank=rank,
+                    worker_id=worker_id,
+                )
+
+    def _prepare_raw_record(
+        self,
+        episode_data: pd.DataFrame,
+        record: dict[str, Any],
+        *,
+        apply_teacher: bool = True,
+    ) -> tuple[VLAStepData, str, int]:
+        vla_step_data = self._extract_raw_vla_step(episode_data, record)
+        if not apply_teacher or str(record["source"]) != "teacher":
+            return vla_step_data, "gt", self.processor_action_horizon
+
+        teacher_row = int(record["teacher_row"])
+        if self.group_teacher is None:
+            return (
+                self._replace_teacher_prefix(vla_step_data, teacher_row),
+                "teacher",
+                self.teacher_horizon,
+            )
+
+        candidate_index = self._group_candidate_for_record(record)
+        if candidate_index is None:
+            metadata = dict(vla_step_data.metadata)
+            metadata.update(
+                {
+                    "flare_source": "gt",
+                    "flare_teacher_row": teacher_row,
+                    "flare_group_fallback": True,
+                    "flare_group_round_id": int(self.group_teacher["round_id"]),
+                }
+            )
+            return (
+                replace(vla_step_data, metadata=metadata),
+                "gt",
+                self.processor_action_horizon,
+            )
+
+        prefix_length = int(self.group_teacher["prefix_lengths"][teacher_row, candidate_index])
+        vla_step_data = self._replace_teacher_prefix(
+            vla_step_data,
+            teacher_row,
+            teacher_actions_lerobot=self.group_teacher["candidate_actions_lerobot"][
+                teacher_row, candidate_index
+            ],
+        )
+        metadata = dict(vla_step_data.metadata)
+        metadata.update(
+            {
+                "flare_group_candidate_index": candidate_index,
+                "flare_group_prefix_length": prefix_length,
+                "flare_group_fallback": False,
+                "flare_group_round_id": int(self.group_teacher["round_id"]),
+            }
+        )
+        return replace(vla_step_data, metadata=metadata), "teacher", prefix_length
+
     def get_raw_record(
         self,
         record_index: int,
@@ -534,11 +655,9 @@ class FlareDistillationDataset(ShardedDataset):
         record = self.index_rows[record_index]
         episode_position = self._episode_position(int(record["episode_index"]))
         episode_data = self.episode_loader[episode_position]
-        vla_step_data = self._extract_raw_vla_step(episode_data, record)
-        if apply_teacher and str(record["source"]) == "teacher":
-            vla_step_data = self._replace_teacher_prefix(
-                vla_step_data, int(record["teacher_row"])
-            )
+        vla_step_data, _, _ = self._prepare_raw_record(
+            episode_data, record, apply_teacher=apply_teacher
+        )
         return vla_step_data
 
     def get_processed_record(self, record_index: int) -> dict[str, Any]:
@@ -557,12 +676,7 @@ class FlareDistillationDataset(ShardedDataset):
         if self.processor is None:
             raise RuntimeError("Processor must be set before loading FLARE shards")
 
-        vla_step_data = self._extract_raw_vla_step(episode_data, record)
-        source = str(record["source"])
-        if source == "teacher":
-            vla_step_data = self._replace_teacher_prefix(
-                vla_step_data, int(record["teacher_row"])
-            )
+        vla_step_data, source, supervised_steps = self._prepare_raw_record(episode_data, record)
 
         messages = [
             {
@@ -587,10 +701,10 @@ class FlareDistillationDataset(ShardedDataset):
                     "Processed action/action_mask must have equal [H, D] shapes, got "
                     f"action={tuple(action.shape)}, mask={tuple(action_mask.shape)}"
                 )
-            if action.shape[0] < self.teacher_horizon:
+            if action.shape[0] < supervised_steps:
                 raise RuntimeError(
                     f"Processed action horizon {action.shape[0]} is shorter than "
-                    f"teacher horizon {self.teacher_horizon}"
+                    f"teacher supervision horizon {supervised_steps}"
                 )
 
             # The flow-matching model encodes the full action trajectory before
@@ -598,12 +712,20 @@ class FlareDistillationDataset(ShardedDataset):
             # the masked tail would leak future expert targets into a teacher
             # sample.  Zero both the numerical tail and its supervision mask.
             action = action.clone()
-            action[self.teacher_horizon :] = 0
+            action[supervised_steps:] = 0
             processed["action"] = action
 
             action_mask = action_mask.clone()
-            action_mask[self.teacher_horizon :] = 0
+            action_mask[supervised_steps:] = 0
             processed["action_mask"] = action_mask
+
+        if self.group_teacher is not None:
+            # Sampling already accounts for q; multiplying by q again would
+            # square the candidate probabilities in the expected objective.
+            processed["action_loss_weight"] = torch.tensor(1.0, dtype=torch.float32)
+            processed["action_loss_source"] = torch.tensor(
+                int(source == "teacher"), dtype=torch.long
+            )
 
         return processed
 
@@ -613,10 +735,15 @@ class FlareDistillationDataset(ShardedDataset):
         Records are grouped by episode so each episode/video is decoded once per
         shard.  ``ShardedMixtureDataset`` shuffles the returned datapoints before
         yielding them, so grouping here does not reduce training randomization.
+        Group-candidate targets are resampled on every load, not every minibatch
+        drawn from the resulting materialized shard.
         """
 
         if idx < 0 or idx >= len(self.shards):
             raise IndexError(f"Shard index {idx} out of bounds")
+
+        if self.group_teacher is not None:
+            self._resample_group_shard(idx)
 
         grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for record_index in self.shards[idx]:

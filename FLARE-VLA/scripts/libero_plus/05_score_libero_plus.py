@@ -11,19 +11,22 @@ candidate files and the GT latent frame bank use the LeRobot gripper convention:
 1=open and 0=close.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import sys
 import time
 import traceback
-from collections import Counter
-from pathlib import Path
 from typing import Any, Iterable
+
 
 # Avoid invalid inherited OpenMP settings before importing torch/OpenMP users.
 _omp = os.environ.get("OMP_NUM_THREADS", "")
@@ -32,25 +35,27 @@ if not _omp.isdigit() or int(_omp) < 1:
 
 import h5py
 import hydra
+from hydra import compose, initialize_config_dir
 import numpy as np
+from omegaconf import open_dict
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from hydra import compose, initialize_config_dir
-from omegaconf import open_dict
+
 
 SCRIPT_PATH = Path(__file__).resolve()
 FLARE_ROOT = SCRIPT_PATH.parents[2]
 ISAAC_ROOT = FLARE_ROOT.parent
 WORKSPACE_ROOT = ISAAC_ROOT.parent
-PROJECT_ROOT = Path(
-    os.environ.get("LEWM_ROOT", WORKSPACE_ROOT / "le-wm")
-).expanduser().resolve()
+PROJECT_ROOT = Path(os.environ.get("LEWM_ROOT", WORKSPACE_ROOT / "le-wm")).expanduser().resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
+if str(ISAAC_ROOT) not in sys.path:
+    sys.path.insert(0, str(ISAAC_ROOT))
 
-DEFAULT_EXPECTED_CKPT_SHA256 = (
-    "ceb52c6b525ca34b5bbdc395e20f6e2b0663bb9d86995e9c00a7ae443ba1d3da"
-)
+from gr00t.utils.checkpoint_snapshot import checkpoint_snapshot_sha256  # noqa: E402
+
+
+DEFAULT_EXPECTED_CKPT_SHA256 = "ceb52c6b525ca34b5bbdc395e20f6e2b0663bb9d86995e9c00a7ae443ba1d3da"
 FULL_MANIFEST_FORMAT = "libero_plus_sparse_manifest_v1"
 CANDIDATE_FORMAT = "flare_groot_manifest_candidates_v1"
 CANDIDATE_SUMMARY_FORMAT = "flare_candidate_generation_summary_v1"
@@ -67,17 +72,13 @@ SUITES = {
     "libero_10",
 }
 
-DEFAULT_MANIFEST = (
-    FLARE_ROOT / "outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl"
-)
+DEFAULT_MANIFEST = FLARE_ROOT / "outputs/libero_plus/manifests/libero_plus_sparse_manifest.jsonl"
 DEFAULT_CANDIDATE_ROOT = ISAAC_ROOT / "outputs/libero_plus/sparse_candidates"
 DEFAULT_GT_H5 = (
-    FLARE_ROOT
-    / "outputs/libero_plus/gt_latents/libero_plus_epoch9_h8_framebank_trainpipe.h5"
+    FLARE_ROOT / "outputs/libero_plus/gt_latents/libero_plus_epoch9_h8_framebank_trainpipe.h5"
 )
 DEFAULT_CHECKPOINT = (
-    PROJECT_ROOT
-    / "stablewm_data/checkpoints/libero_plus_lewm_full/weights_epoch_9.pt"
+    PROJECT_ROOT / "stablewm_data/checkpoints/libero_plus_lewm_full/weights_epoch_9.pt"
 )
 DEFAULT_OUTPUT_DIR = FLARE_ROOT / "outputs/libero_plus/teacher_scoring"
 
@@ -186,6 +187,32 @@ def is_sha256(value: Any) -> bool:
     return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
+def _validate_single_policy_options(
+    single_policy_checkpoint: Path | None, policy_checkpoint_sha256: str | None
+) -> None:
+    if (single_policy_checkpoint is None) != (policy_checkpoint_sha256 is None):
+        raise ValueError("Use --single-policy-checkpoint and --policy-checkpoint-sha256 together")
+    if policy_checkpoint_sha256 is not None and not is_sha256(policy_checkpoint_sha256):
+        raise ValueError("--policy-checkpoint-sha256 must be 64 lowercase hex characters")
+
+
+def verify_single_policy_checkpoint(
+    single_policy_checkpoint: Path | None, policy_checkpoint_sha256: str | None
+) -> tuple[Path | None, str | None]:
+    """Verify a frozen policy once per run, never once per scored sample."""
+
+    _validate_single_policy_options(single_policy_checkpoint, policy_checkpoint_sha256)
+    if single_policy_checkpoint is None:
+        return None, None
+    checkpoint = single_policy_checkpoint.expanduser().resolve()
+    actual = checkpoint_snapshot_sha256(checkpoint)
+    if actual != policy_checkpoint_sha256:
+        raise RuntimeError(
+            f"Policy checkpoint SHA-256 mismatch: {actual} != {policy_checkpoint_sha256}"
+        )
+    return checkpoint, actual
+
+
 def validate_manifest(rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise RuntimeError("Manifest is empty")
@@ -201,45 +228,32 @@ def validate_manifest(rows: list[dict[str, Any]]) -> None:
 
         if row.get("sample_index") != expected_index:
             raise RuntimeError(
-                f"Manifest row {expected_index} has sample_index="
-                f"{row.get('sample_index')!r}"
+                f"Manifest row {expected_index} has sample_index={row.get('sample_index')!r}"
             )
         suite = row.get("suite")
         if suite not in SUITES:
-            raise RuntimeError(
-                f"Manifest sample {sample_id} has invalid suite={suite!r}"
-            )
+            raise RuntimeError(f"Manifest sample {sample_id} has invalid suite={suite!r}")
         if row.get("gt_latent_key") != suite:
             raise RuntimeError(
                 f"Manifest sample {sample_id} has gt_latent_key="
                 f"{row.get('gt_latent_key')!r}, expected {suite!r}"
             )
-        if int(row.get("lewm_episode_index", -1)) != int(
-            row.get("episode_index", -2)
-        ):
-            raise RuntimeError(
-                f"Manifest sample {sample_id} is not in LeRobot episode order"
-            )
+        if int(row.get("lewm_episode_index", -1)) != int(row.get("episode_index", -2)):
+            raise RuntimeError(f"Manifest sample {sample_id} is not in LeRobot episode order")
 
         global_index = int(row["global_index"])
         history_rows = [int(value) for value in row.get("history_rows", [])]
         future_rows = [int(value) for value in row.get("future_rows", [])]
         if history_rows != [global_index - 2, global_index - 1, global_index]:
-            raise RuntimeError(
-                f"Manifest sample {sample_id} has invalid history_rows"
-            )
+            raise RuntimeError(f"Manifest sample {sample_id} has invalid history_rows")
         if future_rows != list(range(global_index + 1, global_index + 9)):
-            raise RuntimeError(
-                f"Manifest sample {sample_id} has invalid future_rows"
-            )
+            raise RuntimeError(f"Manifest sample {sample_id} has invalid future_rows")
         if (
             int(row.get("history_size", -1)) != 3
             or int(row.get("window_horizon", row.get("horizon", -1))) != 8
             or int(row.get("candidate_k", -1)) != 4
         ):
-            raise RuntimeError(
-                f"Manifest sample {sample_id} does not satisfy history=3,H=8,K=4"
-            )
+            raise RuntimeError(f"Manifest sample {sample_id} does not satisfy history=3,H=8,K=4")
 
 
 def validate_h5_contract(
@@ -272,9 +286,7 @@ def validate_h5_contract(
     }
     for key, expected in expected_scalars.items():
         if int(attrs.get(key, -1)) != expected:
-            raise RuntimeError(
-                f"GT latent H5 {key}={attrs.get(key)!r}, expected {expected}"
-            )
+            raise RuntimeError(f"GT latent H5 {key}={attrs.get(key)!r}, expected {expected}")
 
     required_datasets = {
         "frame_latent",
@@ -300,9 +312,7 @@ def validate_h5_contract(
     if h5["frame_action"].shape != (total_frames, 7):
         raise RuntimeError(f"Unexpected frame_action shape: {h5['frame_action'].shape}")
     if h5["window_future_row"].shape != (total_windows, horizon):
-        raise RuntimeError(
-            f"Unexpected window_future_row shape: {h5['window_future_row'].shape}"
-        )
+        raise RuntimeError(f"Unexpected window_future_row shape: {h5['window_future_row'].shape}")
 
     episode_ids = np.asarray(h5["episode_id"][:], dtype=np.int64)
     ep_offsets = np.asarray(h5["ep_offset"][:], dtype=np.int64)
@@ -323,8 +333,7 @@ def validate_h5_contract(
     h5_checkpoint_path = Path(str(attrs.get("checkpoint_path", ""))).expanduser()
     if h5_checkpoint_path.resolve() != checkpoint_path.resolve():
         raise RuntimeError(
-            "GT latent H5 was generated with a different checkpoint path: "
-            f"{h5_checkpoint_path}"
+            f"GT latent H5 was generated with a different checkpoint path: {h5_checkpoint_path}"
         )
     if int(attrs.get("checkpoint_epoch", -1)) != int(checkpoint.get("epoch", -2)):
         raise RuntimeError("GT latent H5/checkpoint epoch mismatch")
@@ -368,9 +377,7 @@ def action_stats(frame_action_ds: h5py.Dataset) -> tuple[torch.Tensor, torch.Ten
         raise RuntimeError("No finite actions in GT latent H5")
     gripper = values[:, 6]
     if torch.any(gripper < -1e-5) or torch.any(gripper > 1.0 + 1e-5):
-        raise RuntimeError(
-            "GT latent H5 does not use the expected LeRobot gripper convention"
-        )
+        raise RuntimeError("GT latent H5 does not use the expected LeRobot gripper convention")
     mean = values.mean(dim=0, keepdim=True)
     std = values.std(dim=0, keepdim=True)
     if not torch.isfinite(mean).all() or not torch.isfinite(std).all():
@@ -442,9 +449,7 @@ def rollout_batch_from_latents(
         .reshape(batch_size * sample_count, history_size, 192)
         .clone()
     )
-    actions = action_sequences.reshape(
-        batch_size * sample_count, total_actions, action_dim
-    )
+    actions = action_sequences.reshape(batch_size * sample_count, total_actions, action_dim)
     act = actions[:, :history_size].clone()
     act_future = actions[:, history_size:]
 
@@ -483,12 +488,13 @@ def validate_candidate_summary(
     candidate_dir: Path,
     manifest_sha256: str,
     expected_total: int,
+    single_policy_checkpoint: Path | None = None,
+    policy_checkpoint_sha256: str | None = None,
 ) -> dict[str, Any]:
+    _validate_single_policy_options(single_policy_checkpoint, policy_checkpoint_sha256)
     summary = load_json(summary_path)
     if summary.get("format") != CANDIDATE_SUMMARY_FORMAT:
-        raise RuntimeError(
-            f"Unexpected candidate summary format: {summary.get('format')!r}"
-        )
+        raise RuntimeError(f"Unexpected candidate summary format: {summary.get('format')!r}")
     if summary.get("status") != "PASS":
         raise RuntimeError(f"Candidate generation did not PASS: {summary}")
     if summary.get("manifest_format") != FULL_MANIFEST_FORMAT:
@@ -502,12 +508,15 @@ def validate_candidate_summary(
         raise RuntimeError("Candidate summary points to a different manifest")
     if Path(str(summary.get("output_dir", ""))).resolve() != candidate_dir.resolve():
         raise RuntimeError("Candidate summary points to a different candidate directory")
+    if single_policy_checkpoint is not None:
+        if Path(str(summary.get("model_path", ""))).resolve() != single_policy_checkpoint.resolve():
+            raise RuntimeError("Single-policy candidate summary model_path mismatch")
+        if summary.get("policy_checkpoint_sha256") != policy_checkpoint_sha256:
+            raise RuntimeError("Single-policy candidate summary policy_checkpoint_sha256 mismatch")
 
     counters = summary.get("counters", {})
     selected = int(counters.get("selected", -1))
-    completed = int(counters.get("generated", 0)) + int(
-        counters.get("skipped_valid", 0)
-    )
+    completed = int(counters.get("generated", 0)) + int(counters.get("skipped_valid", 0))
     if (
         selected != expected_total
         or int(counters.get("failed", -1)) != 0
@@ -538,6 +547,7 @@ def valid_score_part(
     candidate_sha256: str,
     candidate_k: int,
     horizon: int,
+    policy_checkpoint_sha256: str | None = None,
 ) -> bool:
     if not path.is_file():
         return False
@@ -560,6 +570,11 @@ def valid_score_part(
         if part.get("gt_h5_sha256") != gt_h5_sha256:
             return False
         if part.get("candidate_sha256") != candidate_sha256:
+            return False
+        if (
+            policy_checkpoint_sha256 is not None
+            and part.get("policy_checkpoint_sha256") != policy_checkpoint_sha256
+        ):
             return False
         checks = {
             "cosine_per_step": (candidate_k, horizon),
@@ -592,14 +607,15 @@ def prepare_sample(
     history_size: int,
     horizon: int,
     manifest_sha256: str,
+    single_policy_checkpoint: Path | None = None,
+    policy_checkpoint_sha256: str | None = None,
 ) -> dict[str, Any]:
+    _validate_single_policy_options(single_policy_checkpoint, policy_checkpoint_sha256)
     candidate = load_torch(candidate_file)
     if candidate.get("format") != CANDIDATE_FORMAT:
         raise RuntimeError(f"Unexpected candidate format: {candidate.get('format')}")
     if candidate.get("manifest_format") != FULL_MANIFEST_FORMAT:
-        raise RuntimeError(
-            f"Candidate manifest_format={candidate.get('manifest_format')!r}"
-        )
+        raise RuntimeError(f"Candidate manifest_format={candidate.get('manifest_format')!r}")
     if candidate.get("manifest_sha256") != manifest_sha256:
         raise RuntimeError("Candidate manifest SHA-256 mismatch")
     for key in ("suite", "gt_latent_key"):
@@ -608,11 +624,22 @@ def prepare_sample(
                 f"Candidate/manifest mismatch for {key}: "
                 f"candidate={candidate.get(key)!r}, manifest={row.get(key)!r}"
             )
-    if Path(str(candidate.get("model_path", ""))).name != row["suite"]:
-        raise RuntimeError("Candidate was generated by the wrong suite checkpoint")
-    for key in ("per_suite_manifest_sha256", "source_candidate_sha256"):
-        if not is_sha256(candidate.get(key)):
-            raise RuntimeError(f"Candidate has invalid {key}")
+    if single_policy_checkpoint is None:
+        if Path(str(candidate.get("model_path", ""))).name != row["suite"]:
+            raise RuntimeError("Candidate was generated by the wrong suite checkpoint")
+        for key in ("per_suite_manifest_sha256", "source_candidate_sha256"):
+            if not is_sha256(candidate.get(key)):
+                raise RuntimeError(f"Candidate has invalid {key}")
+    else:
+        if (
+            Path(str(candidate.get("model_path", ""))).resolve()
+            != single_policy_checkpoint.resolve()
+        ):
+            raise RuntimeError(
+                "Candidate was generated by a different single-policy checkpoint path"
+            )
+        if candidate.get("policy_checkpoint_sha256") != policy_checkpoint_sha256:
+            raise RuntimeError("Candidate single-policy checkpoint SHA-256 mismatch")
 
     scalar_fields = (
         "sample_id",
@@ -671,9 +698,7 @@ def prepare_sample(
     history_latents = torch.from_numpy(
         np.asarray(h5["frame_latent"][history_rows], dtype=np.float32)
     )
-    gt_latents = torch.from_numpy(
-        np.asarray(h5["frame_latent"][future_rows], dtype=np.float32)
-    )
+    gt_latents = torch.from_numpy(np.asarray(h5["frame_latent"][future_rows], dtype=np.float32))
     historical_actions = torch.from_numpy(
         np.asarray(
             h5["frame_action"][global_row - (history_size - 1) : global_row],
@@ -705,7 +730,7 @@ def prepare_sample(
             f"Action sequence shape {all_sequences.shape}, expected {expected_sequence_shape}"
         )
 
-    return {
+    prepared = {
         "row": row,
         "candidate_path": candidate_file,
         "candidate_sha256": candidate_sha256,
@@ -719,6 +744,9 @@ def prepare_sample(
             candidate.get("candidate_0_vs_1_max_abs_diff", math.nan)
         ),
     }
+    if policy_checkpoint_sha256 is not None:
+        prepared["policy_checkpoint_sha256"] = policy_checkpoint_sha256
+    return prepared
 
 
 # -----------------------------------------------------------------------------
@@ -755,9 +783,7 @@ def make_score_part(
     cosine_score = cosine_per_step.mean(dim=-1)
     mse_score = mse_per_step.mean(dim=-1)
 
-    oracle_cosine_per_step = F.cosine_similarity(
-        oracle_predicted, gt_latents, dim=-1, eps=1e-12
-    )
+    oracle_cosine_per_step = F.cosine_similarity(oracle_predicted, gt_latents, dim=-1, eps=1e-12)
     oracle_mse_per_step = (oracle_predicted - gt_latents).pow(2).mean(dim=-1)
     oracle_cosine_score = oracle_cosine_per_step.mean()
     oracle_mse_score = oracle_mse_per_step.mean()
@@ -817,15 +843,15 @@ def make_score_part(
         "teacher_action_cosine_lerobot": candidate_actions[teacher_cosine].cpu(),
         "teacher_action_mse_lerobot": candidate_actions[teacher_mse].cpu(),
         "candidate_generation_seconds": prepared["candidate_generation_seconds"],
-        "candidate_0_vs_1_max_abs_diff": prepared[
-            "candidate_0_vs_1_max_abs_diff"
-        ],
+        "candidate_0_vs_1_max_abs_diff": prepared["candidate_0_vs_1_max_abs_diff"],
         "scoring_seconds": scoring_seconds,
     }
     if save_predicted_latents:
         part["predicted_latents"] = predicted.cpu()
         part["oracle_predicted_latents"] = oracle_predicted.cpu()
         part["gt_latents"] = gt_latents.cpu()
+    if "policy_checkpoint_sha256" in prepared:
+        part["policy_checkpoint_sha256"] = prepared["policy_checkpoint_sha256"]
     return part
 
 
@@ -866,6 +892,8 @@ def aggregate_results(
     gt_h5_sha256: str,
     candidate_k: int,
     horizon: int,
+    policy_checkpoint_sha256: str | None = None,
+    single_policy_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     if completed_mask.shape != (len(selected_rows),):
         raise RuntimeError("Internal completed-mask shape mismatch")
@@ -895,6 +923,11 @@ def aggregate_results(
     # is prohibitively expensive for the 487,880-window LIBERO-Plus manifest.
     for path in part_paths:
         part = load_torch(path)
+        if (
+            policy_checkpoint_sha256 is not None
+            and part.get("policy_checkpoint_sha256") != policy_checkpoint_sha256
+        ):
+            raise RuntimeError(f"Policy checkpoint SHA-256 mismatch in aggregation: {path}")
         cosine = torch.as_tensor(part["cosine_score"]).float()
         mse = torch.as_tensor(part["mse_score"]).float()
         record: dict[str, Any] = {
@@ -917,9 +950,7 @@ def aggregate_results(
             "mse_margin": float(part["mse_margin"]),
             "oracle_cosine_score": float(part["oracle_cosine_score"]),
             "oracle_mse_score": float(part["oracle_mse_score"]),
-            "oracle_better_than_all_cosine": bool(
-                part["oracle_better_than_all_cosine"]
-            ),
+            "oracle_better_than_all_cosine": bool(part["oracle_better_than_all_cosine"]),
             "oracle_better_than_all_mse": bool(part["oracle_better_than_all_mse"]),
             "oracle_cosine_gap": float(part["oracle_cosine_gap"]),
             "oracle_mse_gap": float(part["oracle_mse_gap"]),
@@ -942,16 +973,12 @@ def aggregate_results(
 
         cosine_per_step.append(torch.as_tensor(part["cosine_per_step"]).numpy())
         mse_per_step.append(torch.as_tensor(part["mse_per_step"]).numpy())
-        oracle_cosine_per_step.append(
-            torch.as_tensor(part["oracle_cosine_per_step"]).numpy()
-        )
+        oracle_cosine_per_step.append(torch.as_tensor(part["oracle_cosine_per_step"]).numpy())
         oracle_mse_per_step.append(torch.as_tensor(part["oracle_mse_per_step"]).numpy())
         teacher_actions_cosine.append(
             torch.as_tensor(part["teacher_action_cosine_lerobot"]).numpy()
         )
-        teacher_actions_mse.append(
-            torch.as_tensor(part["teacher_action_mse_lerobot"]).numpy()
-        )
+        teacher_actions_mse.append(torch.as_tensor(part["teacher_action_mse_lerobot"]).numpy())
         gt_actions.append(torch.as_tensor(part["gt_actions_lerobot"]).numpy())
 
     df = pd.DataFrame(records).sort_values("sample_index").reset_index(drop=True)
@@ -1039,17 +1066,15 @@ def aggregate_results(
         ),
         "gt_actions_lerobot": torch.from_numpy(np.stack(gt_actions).astype(np.float32)),
         "cosine_scores": torch.from_numpy(
-            df[[f"candidate_{i}_cosine" for i in range(candidate_k)]].to_numpy(
-                dtype=np.float32
-            )
+            df[[f"candidate_{i}_cosine" for i in range(candidate_k)]].to_numpy(dtype=np.float32)
         ),
         "mse_scores": torch.from_numpy(
-            df[[f"candidate_{i}_mse" for i in range(candidate_k)]].to_numpy(
-                dtype=np.float32
-            )
+            df[[f"candidate_{i}_mse" for i in range(candidate_k)]].to_numpy(dtype=np.float32)
         ),
     }
     teacher_records_path = output_dir / "validation_teacher_records.pt"
+    if policy_checkpoint_sha256 is not None:
+        teacher_records["policy_checkpoint_sha256"] = policy_checkpoint_sha256
     atomic_torch_save(teacher_records_path, teacher_records)
 
     cosine_counts = Counter(int(v) for v in teacher_cos_idx)
@@ -1082,16 +1107,10 @@ def aggregate_results(
             "mse_count": int(df["oracle_better_than_all_mse"].sum()),
             "mse_rate": float(df["oracle_better_than_all_mse"].mean()),
             "both_count": int(
-                (
-                    df["oracle_better_than_all_cosine"]
-                    & df["oracle_better_than_all_mse"]
-                ).sum()
+                (df["oracle_better_than_all_cosine"] & df["oracle_better_than_all_mse"]).sum()
             ),
             "both_rate": float(
-                (
-                    df["oracle_better_than_all_cosine"]
-                    & df["oracle_better_than_all_mse"]
-                ).mean()
+                (df["oracle_better_than_all_cosine"] & df["oracle_better_than_all_mse"]).mean()
             ),
         },
         "teacher_index_distribution": {
@@ -1110,9 +1129,7 @@ def aggregate_results(
         "metric_distributions": {
             "best_cosine_score": numeric_summary(df["best_cosine_score"].to_numpy()),
             "best_mse_score": numeric_summary(df["best_mse_score"].to_numpy()),
-            "oracle_cosine_score": numeric_summary(
-                df["oracle_cosine_score"].to_numpy()
-            ),
+            "oracle_cosine_score": numeric_summary(df["oracle_cosine_score"].to_numpy()),
             "oracle_mse_score": numeric_summary(df["oracle_mse_score"].to_numpy()),
             "cosine_margin": numeric_summary(df["cosine_margin"].to_numpy()),
             "mse_margin": numeric_summary(df["mse_margin"].to_numpy()),
@@ -1142,6 +1159,9 @@ def aggregate_results(
             "teacher_records": str(teacher_records_path),
         },
     }
+    if policy_checkpoint_sha256 is not None:
+        summary["policy_checkpoint_sha256"] = policy_checkpoint_sha256
+        summary["single_policy_checkpoint"] = str(single_policy_checkpoint)
     atomic_write_json(output_dir / "validation_summary.json", summary)
     return summary
 
@@ -1152,7 +1172,7 @@ def aggregate_results(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
         "--candidate-dir",
@@ -1166,6 +1186,17 @@ def main() -> None:
     )
     parser.add_argument("--gt-h5", type=Path, default=DEFAULT_GT_H5)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument(
+        "--single-policy-checkpoint",
+        type=Path,
+        default=None,
+        help="Opt in to one frozen GR00T policy for the full manifest, without per-suite merger provenance.",
+    )
+    parser.add_argument(
+        "--policy-checkpoint-sha256",
+        default=None,
+        help="Content identity of --single-policy-checkpoint; both options are required together.",
+    )
     parser.add_argument(
         "--expected-checkpoint-sha256",
         default=DEFAULT_EXPECTED_CKPT_SHA256,
@@ -1188,6 +1219,9 @@ def main() -> None:
         raise ValueError("--max-samples must be >= 1")
     if not is_sha256(args.expected_checkpoint_sha256):
         raise ValueError("--expected-checkpoint-sha256 must be 64 lowercase hex characters")
+    args.single_policy_checkpoint, args.policy_checkpoint_sha256 = verify_single_policy_checkpoint(
+        args.single_policy_checkpoint, args.policy_checkpoint_sha256
+    )
 
     # Reproducible inference settings. The script contains no intentional RNG,
     # but these settings reduce backend-dependent variation across reruns.
@@ -1205,9 +1239,7 @@ def main() -> None:
 
     all_rows = load_jsonl(args.manifest)
     validate_manifest(all_rows)
-    selected_rows = (
-        all_rows[: args.max_samples] if args.max_samples is not None else all_rows
-    )
+    selected_rows = all_rows[: args.max_samples] if args.max_samples is not None else all_rows
     if not selected_rows:
         raise RuntimeError("No manifest samples selected")
 
@@ -1216,8 +1248,7 @@ def main() -> None:
     gt_h5_sha256 = sha256_file(args.gt_h5)
     if checkpoint_sha256 != args.expected_checkpoint_sha256:
         raise RuntimeError(
-            f"Checkpoint SHA-256 mismatch: {checkpoint_sha256} != "
-            f"{args.expected_checkpoint_sha256}"
+            f"Checkpoint SHA-256 mismatch: {checkpoint_sha256} != {args.expected_checkpoint_sha256}"
         )
     generation_summary = validate_candidate_summary(
         args.candidate_summary,
@@ -1225,6 +1256,8 @@ def main() -> None:
         args.candidate_dir,
         manifest_sha256,
         len(all_rows),
+        args.single_policy_checkpoint,
+        args.policy_checkpoint_sha256,
     )
 
     history_size = 3
@@ -1259,6 +1292,7 @@ def main() -> None:
             csha,
             candidate_k,
             horizon,
+            policy_checkpoint_sha256=args.policy_checkpoint_sha256,
         ):
             skipped += 1
             completed_mask[selected_position] = True
@@ -1305,9 +1339,7 @@ def main() -> None:
             mean, std = action_stats(h5["frame_action"])
 
             total_batches = math.ceil(len(pending) / args.batch_size)
-            for batch_number, batch_rows in enumerate(
-                chunks(pending, args.batch_size), start=1
-            ):
+            for batch_number, batch_rows in enumerate(chunks(pending, args.batch_size), start=1):
                 prepared_items: list[dict[str, Any]] = []
                 for selected_position, row, candidate_sha256 in batch_rows:
                     try:
@@ -1321,6 +1353,8 @@ def main() -> None:
                             history_size=history_size,
                             horizon=horizon,
                             manifest_sha256=manifest_sha256,
+                            single_policy_checkpoint=args.single_policy_checkpoint,
+                            policy_checkpoint_sha256=args.policy_checkpoint_sha256,
                         )
                         prepared["selected_position"] = selected_position
                         prepared_items.append(prepared)
@@ -1384,6 +1418,7 @@ def main() -> None:
                             item["candidate_sha256"],
                             candidate_k,
                             horizon,
+                            policy_checkpoint_sha256=args.policy_checkpoint_sha256,
                         ):
                             raise RuntimeError("Saved score part failed post-write validation")
                         completed_mask[item["selected_position"]] = True
@@ -1427,6 +1462,7 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    verify_single_policy_checkpoint(args.single_policy_checkpoint, args.policy_checkpoint_sha256)
     aggregation = aggregate_results(
         selected_rows=selected_rows,
         completed_mask=completed_mask,
@@ -1437,6 +1473,8 @@ def main() -> None:
         gt_h5_sha256=gt_h5_sha256,
         candidate_k=candidate_k,
         horizon=horizon,
+        policy_checkpoint_sha256=args.policy_checkpoint_sha256,
+        single_policy_checkpoint=args.single_policy_checkpoint,
     )
 
     elapsed = time.time() - started
@@ -1469,6 +1507,9 @@ def main() -> None:
         "average_seconds_per_selected_sample": elapsed / len(selected_rows),
         "validation_summary": str(output_dir / "validation_summary.json"),
     }
+    if args.policy_checkpoint_sha256 is not None:
+        run_summary["policy_checkpoint_sha256"] = args.policy_checkpoint_sha256
+        run_summary["single_policy_checkpoint"] = str(args.single_policy_checkpoint)
     atomic_write_json(summary_path, run_summary)
 
     print("\n========== FINAL ==========")

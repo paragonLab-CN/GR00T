@@ -31,6 +31,7 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
     CategorySpecificMLP,
     MultiEmbodimentActionEncoder,
 )
+from gr00t.utils.action_loss import reduce_action_loss
 
 
 logger = logging.getLogger(__name__)
@@ -263,7 +264,13 @@ class Gr00tN1d7ActionHead(nn.Module):
         # Slice out only the action portion of pred and target.
         action_mask = action_input.action_mask
         action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = action_loss.sum() / (action_mask.sum() + 1e-6)
+        loss = reduce_action_loss(
+            action_loss,
+            action_mask,
+            sample_weights=action_input.get("action_loss_weight"),
+            sample_sources=action_input.get("action_loss_source"),
+            teacher_loss_weight=getattr(self.config, "group_teacher_loss_weight", 0.3),
+        )
 
         return {
             "loss": loss,
@@ -405,10 +412,14 @@ class Gr00tN1d7ActionHead(nn.Module):
             # mutate the saved initial-noise record. Device/dtype conversion is
             # deliberately done here, at the point where the model requirements
             # are known exactly.
-            actions = initial_noise.detach().to(
-                device=device,
-                dtype=vl_embeds.dtype,
-            ).clone()
+            actions = (
+                initial_noise.detach()
+                .to(
+                    device=device,
+                    dtype=vl_embeds.dtype,
+                )
+                .clone()
+            )
             if not torch.isfinite(actions).all():
                 raise ValueError("initial_noise contains NaN or Inf values")
 
@@ -698,8 +709,7 @@ class Gr00tN1d7(PreTrainedModel):
             initial_noises = torch.as_tensor(initial_noises)
         if initial_noises.ndim != 4:
             raise ValueError(
-                "initial_noises must have shape [B,K,H,D]; "
-                f"got {tuple(initial_noises.shape)}"
+                f"initial_noises must have shape [B,K,H,D]; got {tuple(initial_noises.shape)}"
             )
 
         batch_size, candidate_k, horizon, action_dim = initial_noises.shape
@@ -749,16 +759,10 @@ class Gr00tN1d7(PreTrainedModel):
         repeated_backbone_features = features.backbone_features.repeat_interleave(
             candidate_k, dim=0
         )
-        repeated_state_features = features.state_features.repeat_interleave(
-            candidate_k, dim=0
-        )
-        repeated_embodiment_id = action_inputs.embodiment_id.repeat_interleave(
-            candidate_k, dim=0
-        )
+        repeated_state_features = features.state_features.repeat_interleave(candidate_k, dim=0)
+        repeated_embodiment_id = action_inputs.embodiment_id.repeat_interleave(candidate_k, dim=0)
 
-        flat_initial_noises = initial_noises.reshape(
-            batch_size * candidate_k, horizon, action_dim
-        )
+        flat_initial_noises = initial_noises.reshape(batch_size * candidate_k, horizon, action_dim)
         candidate_options = dict(options or {})
         candidate_options["initial_noise"] = flat_initial_noises
 

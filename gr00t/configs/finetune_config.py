@@ -59,6 +59,9 @@ class FinetuneConfig:
     teacher_mix_ratio: float = 0.2
     """Target sampling fraction for the teacher-only source when full GT is retained."""
 
+    group_teacher_loss_weight: float = 0.3
+    """Teacher loss coefficient for grouped sidecars; independent of sampling and prefix length."""
+
     fixed_gt_samples_per_batch: int | None = None
     """Optional exact number of physical GT samples in every per-device micro-batch."""
 

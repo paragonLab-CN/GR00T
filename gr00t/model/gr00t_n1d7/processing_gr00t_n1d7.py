@@ -88,6 +88,7 @@ class Gr00tN1d7DataCollator:
         model_name: str,
         model_type: str = "qwen",
         transformers_loading_kwargs: dict = {},
+        group_teacher_mode: bool = False,
     ):
         ### We need to use the same processor for padding input ids and concat
         self.processor = build_processor(model_name, transformers_loading_kwargs)
@@ -95,14 +96,26 @@ class Gr00tN1d7DataCollator:
         self.processor.tokenizer.padding_side = "left"
         self.model_type = model_type
         self.model_name = model_name
+        self.group_teacher_mode = group_teacher_mode
 
     def __call__(self, features: list[Dict[str, Any]]) -> BatchFeature:
         batch = {}
         keys = list(set().union(*(elem.keys() for elem in features)))
+        if self.group_teacher_mode:
+            # All ranks must enter the same source-normalization collectives,
+            # including ranks whose current batch contains only physical GT.
+            keys = list(set(keys) | {"action_loss_weight", "action_loss_source"})
 
         for key in keys:
             values = [elem[key] for elem in features if key in elem]
-            if key == "vlm_content":
+            if key in ("action_loss_weight", "action_loss_source"):
+                # Ordinary physical GT samples do not carry group metadata.
+                default = 1.0 if key == "action_loss_weight" else 0
+                dtype = torch.float32 if key == "action_loss_weight" else torch.long
+                batch[key] = torch.as_tensor(
+                    [elem.get(key, default) for elem in features], dtype=dtype
+                )
+            elif key == "vlm_content":
                 # Handle vlm_content specially - extract text and images
                 text_list = []
                 image_inputs = []

@@ -15,6 +15,7 @@
 
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 from typing import List, Optional
 
@@ -108,9 +109,7 @@ class Config:
             if d_cfg.dataset_type not in {"physical_embodiment", "flare_distillation"}:
                 raise ValueError(f"Unsupported dataset_type: {d_cfg.dataset_type!r}")
             if not d_cfg.embodiment_tag:
-                raise ValueError(
-                    f"Embodiment tag is empty for dataset paths {d_cfg.dataset_paths}"
-                )
+                raise ValueError(f"Embodiment tag is empty for dataset paths {d_cfg.dataset_paths}")
             if d_cfg.dataset_type == "flare_distillation":
                 if len(d_cfg.dataset_paths) != 1:
                     raise ValueError(
@@ -118,13 +117,9 @@ class Config:
                         f"dataset path, got {d_cfg.dataset_paths}"
                     )
                 if not d_cfg.distillation_index_path:
-                    raise ValueError(
-                        "flare_distillation requires distillation_index_path"
-                    )
+                    raise ValueError("flare_distillation requires distillation_index_path")
                 if not d_cfg.teacher_records_path:
-                    raise ValueError(
-                        "flare_distillation requires teacher_records_path"
-                    )
+                    raise ValueError("flare_distillation requires teacher_records_path")
                 for sidecar in [
                     d_cfg.distillation_index_path,
                     d_cfg.teacher_records_path,
@@ -164,9 +159,10 @@ class Config:
             if fixed_gt <= 0 or fixed_teacher <= 0:
                 raise ValueError("Fixed GT and teacher sample counts must both be positive")
             dataset_types = [dataset.dataset_type for dataset in self.data.datasets]
-            if dataset_types.count("physical_embodiment") != 1 or dataset_types.count(
-                "flare_distillation"
-            ) != 1:
+            if (
+                dataset_types.count("physical_embodiment") != 1
+                or dataset_types.count("flare_distillation") != 1
+            ):
                 raise ValueError(
                     "Fixed GT replay requires exactly one physical_embodiment and "
                     "one flare_distillation data source"
@@ -201,6 +197,12 @@ class Config:
                 ] * len(self.data.modality_configs[embodiment_tag]["action"].modality_keys)
 
         # Validate precision settings
+        group_teacher_loss_weight = getattr(self.model, "group_teacher_loss_weight", 0.3)
+        if (
+            not math.isfinite(group_teacher_loss_weight)
+            or not 0.0 <= group_teacher_loss_weight <= 1.0
+        ):
+            raise ValueError("group_teacher_loss_weight must be finite and lie in [0, 1]")
         if self.training.fp16 and self.training.bf16:
             raise ValueError("Cannot use both fp16 and bf16")
 
