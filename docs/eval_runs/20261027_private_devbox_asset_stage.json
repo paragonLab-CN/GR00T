@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "evidence_type": "private_devbox_public_asset_staging_not_closed_loop_evaluation",
+  "recorded_at": "2026-10-27T11:31:35Z",
+  "status": "stopped_by_user_no_gpu",
+  "execution_scope": {
+    "platform": "Merlin",
+    "surface": "existing_user_private_devbox",
+    "private_devbox_inventory_verified": true,
+    "standalone_jobs_submitted_in_this_continuation": 0,
+    "gpu_workers_launched_in_this_continuation": 0,
+    "machines_created_or_resized_in_this_continuation": 0,
+    "cpu_rollout_attempted": false,
+    "previous_standalone_preflight_is_not_private_devbox": true,
+    "previous_standalone_preflight_record": "20261027_merlin_libero_runtime_preflight.json"
+  },
+  "private_devbox_inventory": {
+    "allocated_cpu_cores": 8,
+    "allocated_memory_gib": 32,
+    "allocated_disk_gib": 128,
+    "attached_workers": 0,
+    "gpu_devices": 0,
+    "host_logical_cpu_count": 128,
+    "host_logical_cpu_count_is_not_allocated_quota": true,
+    "python": "3.11.2",
+    "torch": {
+      "cuda_available": false,
+      "cuda_build": "12.9",
+      "device_count": 0,
+      "torch": "2.9.1"
+    },
+    "nvidia_smi_result_is_stub_not_gpu_evidence": true
+  },
+  "source_verification": {
+    "gr00t_branch": "codex/trusted-prefix-group-distillation",
+    "initial_gr00t_commit": "b2014620dfd1a678467ed69a15655b30cce636f8",
+    "staged_gr00t_commit": "262cdd1aa9fbac0166e4684d1ef555a4fdd91e5c",
+    "libero_plus_commit": "4976dc30028e805ff8094b55501d532c48fec182",
+    "stage_script": "scripts/flare/stage_public_libero_asset.py",
+    "stage_script_sha256": "ee948ba7e4b9330b55ba8f79e71e33d92b6376cedf61f9698c0da3a0fed14372",
+    "stage_script_remote_verification_completed": true
+  },
+  "large_public_assets": {
+    "status": "completed",
+    "target_root": "/home/tiger/gr00t-private-eval-20261027",
+    "downloaded_directly_on_private_devbox": true,
+    "large_files_staged_on_workstation": false,
+    "tls_verification_required": true,
+    "official_cdn_hostname": "us.aws.cdn.hf.co",
+    "verified_bytes": 13306348994,
+    "records": [
+      {
+        "asset": "spatial_shard2",
+        "elapsed_seconds": 31.838,
+        "expected_bytes": 1919980184,
+        "private_https_head": {
+          "content_length": 1919980184,
+          "http_status": 200,
+          "tls_verification_required": true,
+          "tls_verified": true
+        },
+        "process_exit_code": 0,
+        "reports": [
+          {
+            "asset": "spatial_shard2",
+            "expected_bytes": 1919980184,
+            "resume_bytes": 0,
+            "status": "start"
+          },
+          {
+            "asset": "spatial_shard2",
+            "reused": false,
+            "status": "completed",
+            "verified_bytes": 1919980184
+          }
+        ],
+        "revision": "2ea293aa20ba7cf5bbf3ba17a5fbcb1a01cbfe21",
+        "sha256": "ac70555aee124ef20d23473c85dbcfda42dc8d9f859384822e8aef19fd2d45dd",
+        "source": "nvidia/GR00T-N1.7-LIBERO",
+        "status": "completed",
+        "target_relative": "checkpoints/GR00T-N1.7-LIBERO/libero_spatial/model-00002-of-00002.safetensors",
+        "verified": true
+      },
+      {
+        "asset": "spatial_shard1",
+        "elapsed_seconds": 55.81,
+        "expected_bytes": 4990519232,
+        "private_https_head": {
+          "content_length": 4990519232,
+          "http_status": 200,
+          "tls_verification_required": true,
+          "tls_verified": true
+        },
+        "process_exit_code": 0,
+        "reports": [
+          {
+            "asset": "spatial_shard1",
+            "expected_bytes": 4990519232,
+            "resume_bytes": 0,
+            "status": "start"
+          },
+          {
+            "asset": "spatial_shard1",
+            "reused": false,
+            "status": "completed",
+            "verified_bytes": 4990519232
+          }
+        ],
+        "revision": "2ea293aa20ba7cf5bbf3ba17a5fbcb1a01cbfe21",
+        "sha256": "b7c7314a989ae3b577e3265e3f25c42a018ab4a476ab99e4d0fa61266d38a878",
+        "source": "nvidia/GR00T-N1.7-LIBERO",
+        "status": "completed",
+        "target_relative": "checkpoints/GR00T-N1.7-LIBERO/libero_spatial/model-00001-of-00002.safetensors",
+        "verified": true
+      },
+      {
+        "asset": "assets_zip",
+        "elapsed_seconds": 58.447,
+        "expected_bytes": 6395849578,
+        "private_https_head": {
+          "content_length": 6395849578,
+          "http_status": 200,
+          "tls_verification_required": true,
+          "tls_verified": true
+        },
+        "process_exit_code": 0,
+        "reports": [
+          {
+            "asset": "assets_zip",
+            "expected_bytes": 6395849578,
+            "resume_bytes": 0,
+            "status": "start"
+          },
+          {
+            "asset": "assets_zip",
+            "reused": false,
+            "status": "completed",
+            "verified_bytes": 6395849578
+          }
+        ],
+        "revision": "dd2bd61b7d9a6fef1abc52d606e983b41886a149",
+        "sha256": "96764a4bfbdaea98d4411598caeab235458318fe0f549611b93d1a323027b3cf",
+        "source": "datasets/Sylvest/LIBERO-plus",
+        "status": "completed",
+        "target_relative": "downloads/LIBERO-plus/assets.zip",
+        "verified": true
+      }
+    ]
+  },
+  "baseline_metadata": {
+    "status": "completed",
+    "source_repo": "nvidia/GR00T-N1.7-LIBERO",
+    "source_revision": "2ea293aa20ba7cf5bbf3ba17a5fbcb1a01cbfe21",
+    "transferred_via_stream_to_private_devbox": true,
+    "sha256_verified": true,
+    "files": [
+      {
+        "bytes": 2266,
+        "file": "config.json",
+        "sha256": "ce763f74ad1cda2ca9e67491229cbc5810d83cae675cb4dad839a69a9731fd97"
+      },
+      {
+        "bytes": 2145,
+        "file": "embodiment_id.json",
+        "sha256": "abc4a749389837416a102d9455a8c089336f2e417afb18565703b9944974bc35"
+      },
+      {
+        "bytes": 104985,
+        "file": "model.safetensors.index.json",
+        "sha256": "407804ea5a62f4f8823f48811ae0edbb82fac101e9cf4d7273e6e2f692bb4d59"
+      },
+      {
+        "bytes": 26935,
+        "file": "processor_config.json",
+        "sha256": "545bb44c7d8caaf5ac82df55b90831271a1469a4e48adcc9a5f469f064f4e121"
+      },
+      {
+        "bytes": 4298385,
+        "file": "statistics.json",
+        "sha256": "853bd068c7a5be4c7657fae634b654de38ea3e64c5e57409cbd3f4b57b6461c2"
+      }
+    ],
+    "complete_baseline_verified_bytes": 6914934132
+  },
+  "disk_and_archive": {
+    "initial_free_bytes": 28818448384,
+    "staging_minimum_free_reserve_bytes": 8589934592,
+    "final_free_bytes": null,
+    "final_free_space_measured": false,
+    "zip_central_directory_inspected": false,
+    "zip_uncompressed_bytes": null,
+    "zip_extracted": false,
+    "unrelated_user_data_deleted": false
+  },
+  "cosmos_access": {
+    "source_repo": "nvidia/Cosmos-Reason2-2B",
+    "source_revision": "9ce19a195e423419c349abfc86fd07178b230561",
+    "anonymous_config_tokenizer_and_weights_probe_count": 3,
+    "anonymous_probe_http_status": 401,
+    "anonymous_probe_error_code": "GatedRepo",
+    "authorized_access_verified": false,
+    "downloaded": false,
+    "access_bypass_attempted": false
+  },
+  "closed_loop_evaluation": {
+    "attempted": false,
+    "stopped_at_user_request": true,
+    "completed": false,
+    "policy_checkpoint_loaded": false,
+    "real_policy_forward_executed": false,
+    "completed_episodes": 0,
+    "summary_all_json_generated": false,
+    "video_generated": false,
+    "task_success_rate": null,
+    "intended_first_policy": "Existing nvidia/GR00T-N1.7-LIBERO/libero_spatial baseline",
+    "group_distillation_student_trained": false
+  },
+  "regression_verification": {
+    "related_python310_cpu_tests_passed": 118,
+    "public_asset_stage_unit_tests_passed": 56,
+    "ruff_check_passed": true,
+    "ruff_format_check_passed": true,
+    "pre_commit_blocker": "Repository has no .pre-commit-config.yaml",
+    "these_tests_are_not_model_or_simulator_evaluation": true
+  },
+  "limitations": [
+    "The user declined closed-loop evaluation after the private devbox was confirmed to have no GPU; no CPU rollout or evaluation dependency installation followed.",
+    "Verified downloads do not demonstrate model loading, software rendering, a LIBERO episode, or method performance.",
+    "The ZIP remains uninspected and unextracted; final free space was not measured.",
+    "Cosmos remains gated, and separate compatible model-server and simulator-client environments have not been provisioned.",
+    "Machine endpoint, SSH details, credentials, signed URLs, raw platform logs, and internal image/queue/storage paths are excluded."
+  ]
+}

@@ -4,11 +4,54 @@ This guide reuses the existing LIBERO/LIBERO-Plus evaluator for the trusted-pref
 group-distillation branch. It does not introduce online LeWM selection, a new
 simulator, or a distributed trajectory collector.
 
+## Current Private-Devbox Constraint
+
+Current authorization is limited to the user's existing private Merlin devbox.
+Do not submit standalone jobs, create/start/restart/resize machines, or launch GPU
+workers. The GPU recipes below are historical references, not current permission.
+The user has now cancelled closed-loop evaluation because that devbox has no GPU:
+status `stopped_by_user_no_gpu`. Do not attempt CPU rollouts, install evaluation
+dependencies, or perform further remote evaluation operations.
+
+Owner-scoped inventory confirmed one running private CPU devbox with 8 allocated
+CPU cores, 32 GiB RAM, 128 GiB disk, and zero attached workers or GPU devices.
+The shared host exposes 128 logical CPUs; that is not the devbox's allocated CPU
+quota. Bound local processes and thread counts to the actual allocation.
+
+The earlier one-H20 preflight was a standalone job, not this private devbox. It is
+terminal `FAILED/failed`, with zero retries and keep time; no new job is authorized.
+The server has a `--device cpu` path, but real CPU model inference, software
+rendering, BF16/SDPA compatibility, and the 15-second default RPC timeout remain
+unverified. GPU absence does not prove CPU inference impossible or ready to run.
+
+## Private Public-Asset Staging
+
+Stage GitHub code and public Hugging Face assets directly on the private devbox
+from pinned official sources. The initial GR00T checkout was verified at
+`b201462`; LIBERO-Plus is pinned to `4976dc30028e805ff8094b55501d532c48fec182`.
+The public-asset stager was published at `262cdd1`; 118 related CPU tests passed,
+but these are regression tests, not proof of a real model or simulator run.
+
+Five baseline JSON files (approximately 4.43 MB) were streamed to the private
+devbox and SHA-256 verified. Two public model shards and `assets.zip` were downloaded
+through the official CDN and SHA-256 verified: 13,306,348,994 bytes in total for
+these three large files. The baseline's two shards plus five JSON files total
+6,914,934,132 bytes. The ZIP has not been inspected or extracted.
+Three anonymous Cosmos asset requests returned HTTP 401 `GatedRepo`: normal
+Hugging Face authorization is required. Do not borrow tokens, use unofficial
+mirrors, or disable TLS to bypass this boundary.
+
+Staging required an 8 GiB free-disk reserve; approximately 28.8 GB was free before
+staging. Final free disk was not measured. Do not extract the ZIP or install an
+evaluation dependency stack after the user's cancellation.
+No real policy forward, LIBERO episode, rollout video, or success rate is claimed.
+See the sanitized [private staging record](eval_runs/20261027_private_devbox_asset_stage.json).
+
 ## Existing Entry Points
 
 | Entry point | Purpose |
 | --- | --- |
-| `gr00t/eval/run_gr00t_server.py` | Load a checkpoint on CUDA and serve actions over ZMQ. |
+| `gr00t/eval/run_gr00t_server.py` | Load a checkpoint on the selected device and serve actions over ZMQ; CPU inference is unverified. |
 | `gr00t/eval/rollout_policy.py` | Execute a policy in a Gymnasium simulator and report per-episode success. |
 | `gr00t/eval/sim/LIBERO/libero_env.py` | Wrap LIBERO or its LIBERO-Plus fork using MuJoCo offscreen rendering. |
 | `gr00t/eval/sim/LIBERO/setup_libero_plus.sh` | Build the dedicated LIBERO-Plus client environment. |
@@ -29,9 +72,10 @@ not an online best-of-K search algorithm.
 
 ## Runtime And Assets
 
-Use one Linux NVIDIA GPU job/pod for the first evaluation. The server and simulator
-client can run on the same node and communicate through `127.0.0.1:5555`, avoiding
-cross-pod routing and port exposure. LIBERO uses MuJoCo/robosuite, not Isaac Sim.
+The following GPU reference assumes a Linux NVIDIA node; it does not authorize a
+new job/pod under the current private-devbox-only constraint. The server and client
+can communicate through `127.0.0.1:5555` on the same machine. LIBERO uses
+MuJoCo/robosuite, not Isaac Sim.
 
 - The repository documents 16 GB+ VRAM for inference. Allocate additional headroom
   for rendering and the actual checkpoint; this is not a measured memory bound.
@@ -200,7 +244,10 @@ across hardware/software stacks. This wrapper's main reset path uses seeded
 shown in its standalone example; describe results as this repository's evaluation
 protocol unless that distinction is resolved.
 
-## Merlin Control-Plane Preflight
+## Historical GPU Control-Plane Reference
+
+Do not submit another job or allocate a worker under the current authorization.
+The historical commands and scheduling guidance below are not the active workflow.
 
 The available local control-plane CLI is `bytedcli merlin`, not a standalone
 `merlin` executable. Use the current configured identity; do not put tokens,
@@ -267,7 +314,8 @@ The sanitized execution record is
 [20261027_merlin_libero_runtime_preflight.json](eval_runs/20261027_merlin_libero_runtime_preflight.json).
 No GR00T checkpoint was loaded, no real LIBERO environment was started, and no
 episode, rollout video, `summary_all.json`, or success rate was produced. The
-authorized workspace still needs policy/backbone/benchmark assets and compatible
-server/client environments; Cosmos access remains unconfirmed. Local Hugging Face
-authentication reports not logged in. The group-distillation student also remains
-untrained. These facts block a method evaluation, not the availability of an H20.
+workspace lacked policy/backbone/benchmark assets and compatible server/client
+environments at that historical preflight. Current private-devbox constraints and
+asset-staging status are recorded above. Cosmos access remains unconfirmed and the
+group-distillation student remains untrained; neither a baseline nor method
+evaluation has completed.
