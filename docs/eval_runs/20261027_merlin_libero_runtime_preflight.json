@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "evidence_type": "runtime_preflight_not_closed_loop_evaluation",
+  "job": {
+    "platform": "Merlin",
+    "job_id": "9eadacbde0de44d5",
+    "trial_id": "440716755",
+    "caption": "gr00t-libero-runtime-preflight-20261027-104647-5bf736",
+    "created_at": "2026-10-27T10:47:43.180Z",
+    "completed_at": "2026-10-27T10:49:26.749Z",
+    "report_at": "2026-10-27T10:49:17.602Z",
+    "elapsed_seconds": 103.569,
+    "observed_states": [
+      "LAUNCHING/disabled",
+      "RUNNING/running",
+      "FAILED/failed"
+    ],
+    "terminal_verified": true,
+    "resources": {
+      "workers": 1,
+      "gpus_per_worker": 1,
+      "gpu_type": "NVIDIA H20",
+      "cpus_per_worker": 22,
+      "memory_mb_per_worker": 232448,
+      "hard_timeout_seconds": 300,
+      "automatic_retries": 0,
+      "keep_minutes": 0
+    },
+    "submitted_resources_and_source_verified": true,
+    "normalized_server_defaults": [
+      "clusterName",
+      "resSchedulingPolicy"
+    ],
+    "queue_free_h20_before": 56,
+    "queue_free_h20_after": 56,
+    "resource_release_evidence": "Terminal job/Arnold state, zero keep/retries, and restored quota snapshot; the persisted allocatedXpu job field is not live allocation.",
+    "pod_level_allocation_verified": false
+  },
+  "source_verification": {
+    "phase": "source_verified",
+    "source_commit": "6f9cc658ac2dff111fd24837e984c9bca1c8f97e",
+    "source_sha256": "5bf7368f6f46c7fe559f3fa0bc0d12beb9da659370c4d3cc674709e3d99ac241",
+    "closed_loop_completed": false
+  },
+  "ephemeral_package_prepare": {
+    "exit_code": 0,
+    "installed": true,
+    "package": "mujoco==3.8.1",
+    "phase": "bounded_package_prepare",
+    "target": "ephemeral_worker_tmp",
+    "timeout_seconds": 90
+  },
+  "runtime_report": {
+    "closed_loop_completed": false,
+    "egl_library_check": {
+      "libEGL_present": true,
+      "libOpenGL_present": true,
+      "presence_only": true,
+      "status": "passed"
+    },
+    "inventory_collected": true,
+    "network_check": {
+      "enabled": true,
+      "sources": [
+        {
+          "content_type": null,
+          "error_type": "URLError",
+          "hostname": "huggingface.co",
+          "http_status": null,
+          "method": "HEAD",
+          "source": "cosmos_config",
+          "status": "failed",
+          "tls_verification_required": true,
+          "tls_verified": false
+        },
+        {
+          "content_type": null,
+          "error_type": "URLError",
+          "hostname": "huggingface.co",
+          "http_status": null,
+          "method": "HEAD",
+          "source": "gr00t_libero_spatial_config",
+          "status": "failed",
+          "tls_verification_required": true,
+          "tls_verified": false
+        },
+        {
+          "content_type": null,
+          "error_type": "URLError",
+          "hostname": "huggingface.co",
+          "http_status": null,
+          "method": "HEAD",
+          "source": "libero_plus_assets",
+          "status": "failed",
+          "tls_verification_required": true,
+          "tls_verified": false
+        }
+      ]
+    },
+    "package_available": {
+      "huggingface_hub": true,
+      "libero": false,
+      "mujoco": true,
+      "torch": true,
+      "transformers": true,
+      "zmq": false
+    },
+    "ready_to_rollout": false,
+    "renderer_check": {
+      "frame_shape": [
+        64,
+        64,
+        3
+      ],
+      "offscreen_passed": true,
+      "renderer": "mujoco_egl_synthetic_box",
+      "status": "passed"
+    },
+    "repo_checkpoint_assets_verified": false,
+    "runtime_check": {
+      "cuda_available": true,
+      "cuda_matmul_passed": true,
+      "cuda_version": "12.9",
+      "gpu_model": "NVIDIA H20",
+      "python": "3.11.2",
+      "status": "passed",
+      "torch": "2.9.1"
+    },
+    "status": "PRECHECK_INCOMPLETE"
+  },
+  "closed_loop_evaluation": {
+    "attempted": false,
+    "completed_episodes": 0,
+    "policy_checkpoint_loaded": false,
+    "task_success_rate": null,
+    "summary_all_json_generated": false,
+    "video_generated": false,
+    "intended_first_policy": "Existing nvidia/GR00T-N1.7-LIBERO/libero_spatial baseline, not a group-distilled student",
+    "blockers": [
+      "No provisioned policy checkpoint, complete Cosmos backbone/processor, or pinned LIBERO-Plus benchmark assets found in the inspected authorized workspace locations.",
+      "All three anonymous revision-pinned HTTPS HEAD requests failed with URLError; no successful HTTPS response or TLS verification was recorded on the GPU worker.",
+      "LIBERO and ZMQ are absent; separate compatible server/client environments have not been provisioned or validated.",
+      "Cosmos gated-asset access is unconfirmed; the local Hugging Face CLI reports not logged in.",
+      "No trained group-distillation student checkpoint exists for a method evaluation."
+    ]
+  },
+  "limitations": [
+    "CUDA arithmetic and the synthetic MuJoCo EGL box render are measured runtime diagnostics, not GR00T inference or a LIBERO episode.",
+    "Python 3.11.2 / Torch 2.9.1 / CUDA 12.9 image compatibility with the repository's complete evaluator has not been established.",
+    "The GPU network report does not classify the underlying URLError; do not infer a specific certificate error from this report.",
+    "MuJoCo was installed only in an ephemeral worker /tmp target with a 90-second bound; no model or benchmark assets were downloaded.",
+    "Credentials, SSH connection details, signed URLs, raw platform logs, image registry paths, and internal storage/queue paths are excluded."
+  ]
+}

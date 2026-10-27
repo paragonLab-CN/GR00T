@@ -242,8 +242,32 @@ Ruff lint/format checks. These tests use fake policy/simulator and mocked GPU/ne
 success paths, not a real episode. The repository does not ship the configured
 `.pre-commit-config.yaml`, so the documented pre-commit command cannot run.
 
-At this source-validation checkpoint, no Merlin job was submitted or started. No
-GPU inference, EGL rendering, benchmark rollout, checkpoint loading, capacity
-reservation, or closed-loop success rate was verified. The local checkout and
-authorized Merlin workspace did not contain the required evaluation environments
-or benchmark/model assets. Runtime execution evidence must be recorded separately.
+On 2026-10-27, a native Merlin submission ran the published runtime probe on one
+H20 worker with a 300-second hard timeout, zero retries, and zero keep time. The
+job reached `RUNNING/running` and terminated as `FAILED/failed` after approximately
+104 seconds with `PRECHECK_INCOMPLETE`. This diagnostic deliberately returns a
+nonzero result when prerequisites are incomplete; it was not a failed LIBERO
+episode. The embedded source SHA-256 and both resource sections were verified
+against the submitted job; server-filled scheduling descriptors were normalized.
+
+Real CUDA arithmetic and a 64x64 MuJoCo EGL synthetic-box render passed. MuJoCo
+3.8.1 was installed into an ephemeral worker `/tmp` target with a 90-second bound.
+The image used Python 3.11.2, Torch 2.9.1, and CUDA 12.9, not a verified complete
+evaluation stack. LIBERO and ZMQ were missing. All three revision-pinned anonymous
+HTTPS HEAD checks failed with `URLError`; no successful HTTPS response or TLS
+verification was recorded. The probe does not classify the underlying network error. No TLS
+verification was disabled, and no model/benchmark assets were downloaded.
+
+The terminal job/Arnold state and zero keep/retries were confirmed; the queue's
+free H20 snapshot returned to its pre-run value of 56. This is not a pod-level
+allocation query, and the job's persisted `allocatedXpu` field is not a live-GPU
+count. The preflight job is terminal, with no automatic retry configured.
+
+The sanitized execution record is
+[20261027_merlin_libero_runtime_preflight.json](eval_runs/20261027_merlin_libero_runtime_preflight.json).
+No GR00T checkpoint was loaded, no real LIBERO environment was started, and no
+episode, rollout video, `summary_all.json`, or success rate was produced. The
+authorized workspace still needs policy/backbone/benchmark assets and compatible
+server/client environments; Cosmos access remains unconfirmed. Local Hugging Face
+authentication reports not logged in. The group-distillation student also remains
+untrained. These facts block a method evaluation, not the availability of an H20.
