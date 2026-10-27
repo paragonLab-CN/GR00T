@@ -43,10 +43,15 @@ cross-pod routing and port exposure. LIBERO uses MuJoCo/robosuite, not Isaac Sim
   with the root environment, whose Gymnasium version differs.
 - The current `pyproject.toml` references a local x86_64 flash-attn wheel under
   `local_wheels/`. A fresh Git checkout alone does not provide that wheel. Provision
-  a compatible wheel/environment before attempting `uv sync`.
+  a compatible wheel/environment before attempting `uv sync`. The model code can
+  fall back to SDPA without flash-attn; the missing wheel blocks the default
+  dependency installation, not every possible inference environment.
 - Provision `external_dependencies/LIBERO-plus` at the pinned submodule revision,
   including its BDDL/task definitions, init files, task classification, and
   external assets. `assets.zip` comes from the authorized LIBERO-Plus source.
+  The repository has a gitlink but no `.gitmodules` URL mapping; a fresh checkout
+  needs an explicit clone of `https://github.com/sylvestf/LIBERO-plus` and checkout
+  of `4976dc30028e805ff8094b55501d532c48fec182`, not just `git submodule update`.
 - Provision the student checkpoint with its model, processor, statistics, and
   embodiment metadata. Also provision the authorized Cosmos-Reason2-2B backbone
   at `checkpoints/Cosmos-Reason2-2B`: the existing single-model script sets this
@@ -62,6 +67,15 @@ Closed-loop student evaluation does not need LeWM, candidate caches, or training
 demonstrations. Those are inputs to training, not to this evaluation entry point.
 Keep checkpoints/results on approved persistent mounts or publish results to
 approved storage; pod-local outputs are ephemeral.
+
+This branch is training code, not a trained student checkpoint. A first wiring
+smoke may use an existing LIBERO baseline and must be labeled as such. For the
+default first spatial task, point `MODEL_PATH` at the `libero_spatial` subdirectory
+of `nvidia/GR00T-N1.7-LIBERO`, not at the repository root or a checkpoint trained
+only on `libero_10`. Method comparisons require actual trained weights. The
+published baseline includes retained backbone tensors, but its processor is not
+self-contained and the current constructor still loads the separate Cosmos
+checkpoint before restoring the VLA state; a policy download alone is insufficient.
 
 The LIBERO-Plus setup script rebuilds its client environment and config directory.
 Only invoke it when that rebuild is intended. Export the repository path first:
@@ -82,6 +96,8 @@ These commands execute evaluation; they are not Merlin job-submission commands.
 ```bash
 export GR00T_ROOT="$PWD"
 export MODEL_PATH=/mnt/checkpoints/trusted_prefix_round1/checkpoint-10000
+export SERVER_PY="$GR00T_ROOT/.venv/bin/python"
+export GR00T_BACKBONE_MODEL_NAME=/mnt/checkpoints/Cosmos-Reason2-2B
 export DEVICE=cuda:0
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
@@ -100,10 +116,10 @@ export SEED=2026
 export DIFFUSION_SEED=2026
 export TASK_LIMIT=1
 export FULL_EVAL=0
-export KEEP_VIDEOS=0
+export KEEP_VIDEOS=1
 export RESUME=0
 unset TASK_FILE_SOURCE
-export EXPECTED_TASK_COUNT=0
+export EXPECTED_TASK_COUNT=1
 
 bash scripts/flare/run_eval_libero_plus_single_model.sh \
   "$MODEL_PATH" trusted_prefix_round1_smoke 5555
@@ -112,6 +128,26 @@ bash scripts/flare/run_eval_libero_plus_single_model.sh \
 The existing environment smoke script is useful for investigation, but currently
 contains a hard-coded checkout path. The direct reset probe above derives the task
 from the installed benchmark and avoids that path assumption.
+
+The launchers accept prepared server/client Python paths and an explicit local
+backbone path. They do not install missing assets or dependencies. A ready ZMQ
+port is not a completed episode: require one actual episode in `summary_all.json`
+and inspect the per-task `results:` log. With `candidate-k=1` and `N_ENVS=1`,
+`episode_infos["episode_lengths"]` counts action-chunk requests, not individual
+simulation steps; a value greater than one demonstrates feedback-driven calls.
+Retain the smoke video for visual inspection before deleting temporary outputs.
+
+For a standalone runtime diagnostic before provisioning policy assets, run:
+
+```bash
+python scripts/flare/preflight_libero_plus_runtime.py --check-network
+```
+
+This bounded probe checks real CUDA arithmetic, optional MuJoCo offscreen
+rendering, and HTTPS access without downloading model/benchmark files. Even a
+passing runtime precheck reports `closed_loop_completed=false` and
+`ready_to_rollout=false`; it never substitutes for a GR00T/LIBERO episode. Do not
+disable TLS verification to work around model-download certificate errors.
 
 `KEEP_VIDEOS=0` deletes videos after each completed task; it does not disable video
 encoding while the task is running. Include the video runtime dependencies and
@@ -178,10 +214,13 @@ bytedcli --site cn --vregion seed merlin quota group resources --group-id "$GROU
 ```
 
 Choose `GROUP_ID` from the nested `group.id`, not the membership record's `id`.
-Confirm GPU quota, queue, image, and mount access before submission. Prefer
-extracting a known-working GPU job definition with `merlin job extract` and
-changing its entrypoint to the smoke/full-evaluation commands above. Do not invent
-an image or resource schema from the presence of a CLI command.
+Confirm GPU quota, queue, image, and mount access before submission. Inspect a
+known-working GPU job definition with the native `merlin job extract` command to
+confirm the schema/image, but do not inherit its identities, credentials,
+environment, mounts, worker counts, retries, or keep settings blindly. Verify all
+duplicated resource sections and use a bounded, single-GPU runtime diagnostic
+before provisioning the actual episode. Do not invent an image or resource schema
+from the presence of a CLI command.
 
 Scale later using disjoint frozen task manifests and distinct output namespaces.
 Fixed-noise seeds depend on task indices in the manifest, so naive task splitting
@@ -197,7 +236,14 @@ read-only job listing, and approved quota-group listing succeeded. The internal
 Merlin skill reference was readable through the existing authorized browser
 session; no authentication material was copied into this guide.
 
-No Merlin job was submitted or started. No GPU inference, EGL rendering, benchmark
-rollout, checkpoint loading, capacity reservation, or closed-loop success rate was
-verified. The local checkout did not contain the required runtime environments or
-benchmark/model assets at inspection time.
+The launcher/client and standalone runtime probe have 62 passing Python 3.10 CPU
+regression tests; the launchers also pass `bash -n`, and the new Python files pass
+Ruff lint/format checks. These tests use fake policy/simulator and mocked GPU/network
+success paths, not a real episode. The repository does not ship the configured
+`.pre-commit-config.yaml`, so the documented pre-commit command cannot run.
+
+At this source-validation checkpoint, no Merlin job was submitted or started. No
+GPU inference, EGL rendering, benchmark rollout, checkpoint loading, capacity
+reservation, or closed-loop success rate was verified. The local checkout and
+authorized Merlin workspace did not contain the required evaluation environments
+or benchmark/model assets. Runtime execution evidence must be recorded separately.

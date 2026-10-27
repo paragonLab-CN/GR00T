@@ -24,9 +24,11 @@ set -euo pipefail
 MODEL_TAG="${1:?Please provide model tag, e.g. GR00T-N1.7-LIBERO}"
 PORT="${2:-5555}"
 
-GR00T_ROOT="${GR00T_ROOT:-/root/autodl-tmp/Isaac-GR00T}"
-LIBERO_PLUS_PY="${GR00T_ROOT}/gr00t/eval/sim/LIBERO/libero_plus_uv/.venv/bin/python"
-LIBERO_PLUS_CONFIG_DIR="${GR00T_ROOT}/gr00t/eval/sim/LIBERO/libero_plus_config"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GR00T_ROOT="${GR00T_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+# Prefer fork-specific overrides, then the generic client/runtime aliases.
+LIBERO_PLUS_PY="${LIBERO_PLUS_PY:-${CLIENT_PY:-${GR00T_ROOT}/gr00t/eval/sim/LIBERO/libero_plus_uv/.venv/bin/python}}"
+LIBERO_PLUS_CONFIG_DIR="${LIBERO_PLUS_CONFIG_DIR:-${LIBERO_CONFIG_PATH:-${GR00T_ROOT}/gr00t/eval/sim/LIBERO/libero_plus_config}}"
 CLASSIFICATION_JSON="${GR00T_ROOT}/external_dependencies/LIBERO-plus/libero/libero/benchmark/task_classification.json"
 
 N_EPISODES="${N_EPISODES:-10}"
@@ -184,7 +186,7 @@ print(f"Saved task list     : {output_path}")
 PY
 fi
 
-NUM_TASKS="$(wc -l < "${TASK_FILE}")"
+NUM_TASKS="$(wc -l < "${TASK_FILE}" | tr -d '[:space:]')"
 if [[ "${EXPECTED_TASK_COUNT}" != "0" && "${NUM_TASKS}" != "${EXPECTED_TASK_COUNT}" ]]; then
     echo "Task manifest count mismatch: ${NUM_TASKS} != ${EXPECTED_TASK_COUNT}" >&2
     exit 1

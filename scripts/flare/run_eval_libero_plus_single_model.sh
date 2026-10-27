@@ -14,6 +14,10 @@ set -euo pipefail
 # 环境变量：
 #   N_EPISODES  每任务评测次数（默认 10）
 #   TASK_LIMIT  只取前 N 个任务（0=全部，用于 smoke test）
+#   SERVER_PY   可选的已配置服务端 Python；未设置时仍使用 uv run --no-sync
+#   SERVER_HOST 服务端绑定地址（默认 127.0.0.1，仅本机客户端）
+#   SERVER_STARTUP_SECONDS 等待服务端启动秒数（默认 300）
+#   CLIENT_PY / LIBERO_PLUS_PY 客户端 Python（由客户端脚本解析）
 #
 # 输出：outputs/eval_libero_plus/<model_tag>/summary_all.json
 # ============================================================================
@@ -22,10 +26,23 @@ MODEL_PATH="${1:?请提供模型路径，如 outputs/libero_plus/.../checkpoint-
 MODEL_TAG="${2:?请提供模型标签，如 gr00t_libero_plus_flare}"
 PORT="${3:-5555}"
 
-GR00T_ROOT="${GR00T_ROOT:-/root/autodl-tmp/Isaac-GR00T}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GR00T_ROOT="${GR00T_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 DEVICE="${DEVICE:-cuda}"
 N_EPISODES="${N_EPISODES:-10}"
 SUITES="libero_spatial,libero_object,libero_goal,libero_10"
+SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
+SERVER_STARTUP_SECONDS="${SERVER_STARTUP_SECONDS:-300}"
+
+if [[ ! "${SERVER_STARTUP_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SERVER_STARTUP_SECONDS must be a positive integer" >&2
+    exit 1
+fi
+
+SERVER_COMMAND=(uv run --no-sync python)
+if [[ -n "${SERVER_PY:-}" ]]; then
+    SERVER_COMMAND=("${SERVER_PY}")
+fi
 
 OUTPUT_ROOT="${GR00T_ROOT}/outputs/eval_libero_plus/${MODEL_TAG}"
 mkdir -p "${OUTPUT_ROOT}"
@@ -42,7 +59,12 @@ cleanup_server() {
 trap cleanup_server EXIT INT TERM
 
 wait_for_server() {
-    for _ in $(seq 1 300); do
+    for _ in $(seq 1 "${SERVER_STARTUP_SECONDS}"); do
+        if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            echo "Policy server exited before becoming ready" >&2
+            tail -n 100 "${SERVER_LOG}" >&2 || true
+            return 1
+        fi
         grep -q "Server ready" "${SERVER_LOG}" 2>/dev/null && return 0
         sleep 1
     done
@@ -62,12 +84,13 @@ echo "============================================"
 
 # 加载 gated 骨干模型 Cosmos-Reason2-2B 需要指向本地路径
 # （见 gr00t/model/gr00t_n1d7/gr00t_n1d7.py 的 GR00T_BACKBONE_MODEL_NAME 覆盖）
-export GR00T_BACKBONE_MODEL_NAME="${GR00T_ROOT}/checkpoints/Cosmos-Reason2-2B"
+export GR00T_BACKBONE_MODEL_NAME="${GR00T_BACKBONE_MODEL_NAME:-${GR00T_ROOT}/checkpoints/Cosmos-Reason2-2B}"
 
-PYTHONUNBUFFERED=1 uv run --no-sync python -u gr00t/eval/run_gr00t_server.py \
+PYTHONUNBUFFERED=1 "${SERVER_COMMAND[@]}" -u gr00t/eval/run_gr00t_server.py \
     --model-path "${MODEL_PATH}" \
     --embodiment-tag LIBERO_PANDA \
     --device "${DEVICE}" \
+    --host "${SERVER_HOST}" \
     --port "${PORT}" \
     --use-sim-policy-wrapper \
     >"${SERVER_LOG}" 2>&1 &
